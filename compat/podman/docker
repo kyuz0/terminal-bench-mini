@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Docker CLI shim for Harbor local-inference runs.
+
+podman-compose 1.6 supports the Compose operations Harbor uses, but unlike the
+Docker Compose plugin it does not accept the global --project-directory flag.
+Preserve the flag's semantics by changing directory and removing it before
+delegating to the host's Docker-compatible Podman wrapper. On both Docker and
+Podman, add an agent-only network override so no-network benchmark tasks can
+call the user's local model while the verifier remains isolated.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import json
+import stat
+import subprocess
+import sys
+
+
+COMPOSE_COMMANDS = {
+    "build",
+    "config",
+    "cp",
+    "down",
+    "exec",
+    "images",
+    "kill",
+    "logs",
+    "ps",
+    "pull",
+    "restart",
+    "rm",
+    "run",
+    "start",
+    "stop",
+    "top",
+    "up",
+}
+
+
+def translated(arguments: list[str]) -> tuple[list[str], Path | None]:
+    if not arguments or arguments[0] != "compose":
+        return arguments, None
+
+    output = [arguments[0]]
+    project_directory: Path | None = None
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--project-directory":
+            if index + 1 >= len(arguments):
+                raise SystemExit("--project-directory requires a value")
+            project_directory = Path(arguments[index + 1])
+            index += 2
+            continue
+        if argument.startswith("--project-directory="):
+            project_directory = Path(argument.split("=", 1)[1])
+            index += 1
+            continue
+        output.append(argument)
+        index += 1
+    return output, project_directory
+
+
+def compose_value(arguments: list[str], option: str) -> str | None:
+    for index, argument in enumerate(arguments):
+        if argument == option and index + 1 < len(arguments):
+            return arguments[index + 1]
+        if argument.startswith(f"{option}="):
+            return argument.split("=", 1)[1]
+    return None
+
+
+def add_agent_network_overlay(arguments: list[str]) -> list[str]:
+    """Let the agent image reach a host-loopback local inference server."""
+    terminal_network = os.environ.get("TBENCH_CONTAINER_NETWORK_MODE")
+    if arguments and arguments[0] == "compose" and terminal_network == "podman-loopback":
+        overlay = Path(__file__).with_name("terminal-network-podman-loopback.json")
+        for index, argument in enumerate(arguments):
+            if argument in COMPOSE_COMMANDS:
+                return [*arguments[:index], "-f", str(overlay), *arguments[index:]]
+
+    network_mode = os.environ.get("TBENCH_AGENT_NETWORK_MODE")
+    if (
+        not arguments
+        or arguments[0] != "compose"
+        or network_mode not in {"bridge", "host"}
+        or Path(os.environ.get("CONTEXT_DIR", ".")).name != "agent-build-context"
+    ):
+        return arguments
+    overlay = Path(__file__).with_name(f"agent-network-{network_mode}.json")
+    for index, argument in enumerate(arguments):
+        if argument in COMPOSE_COMMANDS:
+            return [*arguments[:index], "-f", str(overlay), *arguments[index:]]
+    return arguments
+
+
+def qualify_image_reference(value: str) -> str:
+    """Make Docker Hub references non-interactive for rootless Podman."""
+    name = value.split("@", 1)[0]
+    first = name.split("/", 1)[0]
+    if "/" not in name or ("." not in first and ":" not in first and first != "localhost"):
+        return f"docker.io/{value}"
+    return value
+
+
+def qualify_compose_image_environment() -> None:
+    for name in ("PREBUILT_IMAGE_NAME", "EGRESS_CONTROL_SIDECAR_IMAGE_NAME"):
+        value = os.environ.get(name)
+        if value:
+            os.environ[name] = qualify_image_reference(value)
+
+
+def relabel_bind_source(source: Path) -> None:
+    """Give a Harbor log directory the SELinux type used by container bind mounts."""
+    if not Path("/sys/fs/selinux/enforce").exists():
+        return
+    completed = subprocess.run(
+        ["chcon", "-Rt", "container_file_t", str(source)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise SystemExit(f"could not relabel Harbor bind mount {source}: {detail}")
+
+
+def has_container_file_label(source: Path) -> bool:
+    try:
+        return b"container_file_t" in os.getxattr(source, "security.selinux")
+    except OSError:
+        return False
+
+
+def prepare_bind_mounts(arguments: list[str]) -> None:
+    """Make Harbor's job-log binds usable by rootless, SELinux-confined containers."""
+    jobs_dir_value = os.environ.get("TBENCH_JOBS_DIR")
+    if not jobs_dir_value:
+        return
+    jobs_dir = Path(jobs_dir_value).resolve()
+    for index, argument in enumerate(arguments):
+        if argument != "-f" or index + 1 >= len(arguments):
+            continue
+        path = Path(arguments[index + 1])
+        if path.suffix != ".json" or not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text())
+            volumes = payload.get("services", {}).get("main", {}).get("volumes", [])
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        for volume in volumes:
+            if not isinstance(volume, dict) or volume.get("type") != "bind":
+                continue
+            source = Path(str(volume.get("source", ""))).resolve()
+            if source.is_dir() and source.is_relative_to(jobs_dir):
+                if stat.S_IMODE(source.stat().st_mode) != 0o777:
+                    source.chmod(0o777)
+                if not has_container_file_label(source):
+                    relabel_bind_source(source)
+
+
+def translated_compose_cp(arguments: list[str]) -> list[str] | None:
+    """Translate unsupported `compose cp` to Podman's container-level cp."""
+    if not arguments or arguments[0] != "compose":
+        return None
+    try:
+        command_index = arguments.index("cp")
+    except ValueError:
+        return None
+    operands = arguments[command_index + 1 :]
+    if len(operands) != 2:
+        raise SystemExit(f"unsupported compose cp arguments: {operands!r}")
+    project = compose_value(arguments[:command_index], "--project-name")
+    if not project:
+        raise SystemExit("compose cp requires --project-name for Podman translation")
+    container = f"{project}_main_1"
+
+    def resolve(value: str) -> str:
+        return f"{container}:{value.removeprefix('main:')}" if value.startswith("main:") else value
+
+    return ["cp", resolve(operands[0]), resolve(operands[1])]
+
+
+def main() -> None:
+    real_docker = os.environ.get("TBENCH_REAL_DOCKER", "/usr/bin/docker")
+    runtime = os.environ.get("TBENCH_CONTAINER_RUNTIME", "podman")
+    if runtime == "podman":
+        qualify_compose_image_environment()
+        arguments, project_directory = translated(sys.argv[1:])
+    else:
+        arguments, project_directory = sys.argv[1:], None
+    arguments = add_agent_network_overlay(arguments)
+    prepare_bind_mounts(arguments)
+    if runtime == "podman":
+        if compose_cp := translated_compose_cp(arguments):
+            os.execv(real_docker, [real_docker, *compose_cp])
+    if project_directory is not None:
+        os.chdir(project_directory)
+    os.execv(real_docker, [real_docker, *arguments])
+
+
+if __name__ == "__main__":
+    main()
