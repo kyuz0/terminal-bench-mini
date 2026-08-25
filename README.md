@@ -1,6 +1,6 @@
-# Terminal-Bench-Local
+# Terminal Bench Mini
 
-Terminal-Bench-Local is a 20-task, computing-focused subset of Terminal-Bench
+Terminal Bench Mini is a 20-task, computing-focused subset of Terminal-Bench
 2.1 for evaluating local models and quantizations. It checks whether a model
 can remain coherent, use a terminal, write and debug code, configure services,
 and finish multi-step work. It is not an official Terminal-Bench 2.1 score.

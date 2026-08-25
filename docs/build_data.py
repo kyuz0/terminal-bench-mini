@@ -323,7 +323,7 @@ def build_dataset(repo_root: Path, repository: str) -> dict:
         "generatedAt": generated_at,
         "repository": repository,
         "benchmark": {
-            "name": "Terminal-Bench-Local-20",
+            "name": "Terminal Bench Mini",
             "taskCount": len(tasks),
             "defaultMetric": "pass-within-attempts",
             "official": False,
