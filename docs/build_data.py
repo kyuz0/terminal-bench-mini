@@ -337,7 +337,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--repository", default="kyuz0/terminal-bench-local")
+    parser.add_argument("--repository", default="kyuz0/terminal-bench-mini")
     return parser.parse_args()
 
 
