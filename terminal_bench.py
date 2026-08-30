@@ -543,15 +543,42 @@ def continue_conditional_attempts(
                 "previous_attempt_job": attempt_job_name(group, attempt - 1),
             }
         )
-        print(f"Attempt {attempt}:         retrying {len(pending)} non-passing task(s)")
-        return_code, exported = execute_harbor_job(
-            config=config,
-            meta=current_meta,
-            results_root=results_root,
-            runtime=runtime,
-            merge_existing_attempts=True,
-            dry_run=dry_run,
-        )
+        job_dir = JOBS_DIR / job_name
+        if job_dir.exists() and not dry_run:
+            existing_meta = load_resume_meta(job_dir)
+            expected_group = str(current_meta.get("attempt_group") or "")
+            existing_group = str(existing_meta.get("attempt_group") or "")
+            expected_profile = str(current_meta.get("profile_hash") or "")
+            existing_profile = str(existing_meta.get("profile_hash") or "")
+            existing_round = int(existing_meta.get("attempt_round") or 1)
+            if (
+                existing_group != expected_group
+                or existing_round != attempt
+                or existing_profile != expected_profile
+            ):
+                raise RunnerError(
+                    f"Existing conditional-attempt job does not match the "
+                    f"expected attempt state: {job_dir}"
+                )
+            print(f"Attempt {attempt}:         resuming existing job {job_name}")
+            return_code, exported, current_meta = resume_harbor_job(
+                job_dir=job_dir,
+                results_root=results_root,
+                runtime=runtime,
+            )
+        else:
+            print(
+                f"Attempt {attempt}:         retrying {len(pending)} "
+                "non-passing task(s)"
+            )
+            return_code, exported = execute_harbor_job(
+                config=config,
+                meta=current_meta,
+                results_root=results_root,
+                runtime=runtime,
+                merge_existing_attempts=True,
+                dry_run=dry_run,
+            )
         if return_code != 0 or not exported:
             return return_code
     return 0
@@ -696,6 +723,41 @@ def load_resume_meta(job_dir: Path) -> dict[str, Any]:
     raise RunnerError(f"Runner metadata not found for {job_dir}")
 
 
+def resume_harbor_job(
+    *,
+    job_dir: Path,
+    results_root: Path,
+    runtime: str,
+) -> tuple[int, bool, dict[str, Any]]:
+    config_path = job_dir / "config.json"
+    if not config_path.is_file():
+        raise RunnerError(f"Harbor job config not found: {config_path}")
+    meta = load_resume_meta(job_dir)
+    command = [*harbor_command(), "job", "resume", "--job-path", str(job_dir)]
+    print(f"Resuming:           {' '.join(command)}", flush=True)
+    try:
+        completed = subprocess.run(
+            command, cwd=ROOT, env=command_environment(runtime), check=False
+        )
+    except KeyboardInterrupt:
+        print("\nResume interrupted; Harbor received the interrupt.", file=sys.stderr)
+        return 130, False, meta
+
+    exported = False
+    if (job_dir / "result.json").is_file():
+        summarize_job(job_dir)
+        model_dir, summary = result_store.export_job(
+            job_dir,
+            results_root=results_root,
+            repo_root=ROOT,
+            run_meta=meta,
+            merge_existing_attempts=True,
+        )
+        print_results_summary(model_dir, summary)
+        exported = True
+    return completed.returncode, exported, meta
+
+
 def add_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--endpoint",
@@ -766,7 +828,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run = sub.add_parser("run", help="Run Terminal-Bench-Local")
     add_connection_args(run)
     add_result_args(run)
-    run.add_argument("--tier", choices=TIERS, default="smoke")
+    run.add_argument(
+        "--tier", choices=TIERS, default="full", help="Task tier to run (default: full)"
+    )
     run.add_argument("--task", help="Run one explicit Terminal-Bench 2.1 task")
     run.add_argument(
         "--attempts",
@@ -837,38 +901,22 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "resume":
             job_dir = args.job.resolve()
-            if not (job_dir / "config.json").is_file():
-                raise RunnerError(f"Harbor job config not found: {job_dir / 'config.json'}")
             runtime, _ = container_runtime()
-            meta = load_resume_meta(job_dir)
-            command = [*harbor_command(), "job", "resume", "--job-path", str(job_dir)]
-            print(f"Resuming:           {' '.join(command)}", flush=True)
-            try:
-                completed = subprocess.run(
-                    command, cwd=ROOT, env=command_environment(runtime), check=False
+            results_root = args.results_dir.resolve()
+            return_code, exported, meta = resume_harbor_job(
+                job_dir=job_dir,
+                results_root=results_root,
+                runtime=runtime,
+            )
+            if return_code == 0 and exported:
+                return continue_conditional_attempts(
+                    meta=meta,
+                    base_config=result_store.read_json(job_dir / "config.json"),
+                    completed_round=int(meta.get("attempt_round") or 1),
+                    results_root=results_root,
+                    runtime=runtime,
                 )
-            except KeyboardInterrupt:
-                print("\nResume interrupted; Harbor received the interrupt.", file=sys.stderr)
-                return 130
-            if (job_dir / "result.json").is_file():
-                summarize_job(job_dir)
-                model_dir, summary = result_store.export_job(
-                    job_dir,
-                    results_root=args.results_dir.resolve(),
-                    repo_root=ROOT,
-                    run_meta=meta,
-                    merge_existing_attempts=True,
-                )
-                print_results_summary(model_dir, summary)
-                if completed.returncode == 0:
-                    return continue_conditional_attempts(
-                        meta=meta,
-                        base_config=result_store.read_json(job_dir / "config.json"),
-                        completed_round=int(meta.get("attempt_round") or 1),
-                        results_root=args.results_dir.resolve(),
-                        runtime=runtime,
-                    )
-            return completed.returncode
+            return return_code
         if args.command == "retry-failed":
             return retry_failed(args)
 

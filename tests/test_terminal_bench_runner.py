@@ -1,12 +1,13 @@
 import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 
 import terminal_bench
 
 
 class TerminalBenchRunnerTests(unittest.TestCase):
-    def test_run_defaults_to_two_conditional_attempts(self):
+    def test_run_defaults_to_full_and_two_conditional_attempts(self):
         args = terminal_bench.parse_args(
             [
                 "run",
@@ -18,6 +19,7 @@ class TerminalBenchRunnerTests(unittest.TestCase):
                 "vulkan",
             ]
         )
+        self.assertEqual(args.tier, "full")
         self.assertEqual(args.attempts, 2)
 
     def test_run_requires_platform_engine_and_backend(self):
@@ -221,6 +223,71 @@ class TerminalBenchRunnerTests(unittest.TestCase):
             self.assertEqual(pending, ["new", "old"])
             self.assertEqual(completed_round, 1)
             self.assertEqual(meta["evaluation_profile"], current)
+
+    def test_conditional_attempt_resumes_existing_job_instead_of_recreating_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            jobs_dir = Path(directory) / "jobs"
+            group = "benchmark-job"
+            attempt_job = jobs_dir / f"{group}-attempt2"
+            attempt_job.mkdir(parents=True)
+            profile_hash = "profile-hash"
+            existing_meta = {
+                "job_name": attempt_job.name,
+                "attempt_group": group,
+                "attempt_round": 2,
+                "profile_hash": profile_hash,
+            }
+            terminal_bench.result_store.write_json(
+                attempt_job / "runner-meta.json", existing_meta
+            )
+
+            meta = {
+                "job_name": group,
+                "attempt_group": group,
+                "attempt_round": 1,
+                "max_attempts": 2,
+                "requested_tasks": ["task-a"],
+                "platform": {"id": "test-local"},
+                "model": {"id": "model"},
+                "result_tag": "test",
+                "profile_hash": profile_hash,
+                "evaluation_profile": {},
+            }
+            config = {
+                "job_name": group,
+                "datasets": [{"task_names": ["task-a"]}],
+            }
+            resumed_meta = {**existing_meta, **meta, "attempt_round": 2}
+
+            with (
+                mock.patch.object(terminal_bench, "JOBS_DIR", jobs_dir),
+                mock.patch.object(
+                    terminal_bench.result_store,
+                    "tasks_requiring_attempt",
+                    return_value=["task-a"],
+                ),
+                mock.patch.object(
+                    terminal_bench,
+                    "resume_harbor_job",
+                    return_value=(0, True, resumed_meta),
+                ) as resume_job,
+                mock.patch.object(terminal_bench, "execute_harbor_job") as execute_job,
+            ):
+                result = terminal_bench.continue_conditional_attempts(
+                    meta=meta,
+                    base_config=config,
+                    completed_round=1,
+                    results_root=Path(directory) / "results",
+                    runtime="podman",
+                )
+
+            self.assertEqual(result, 0)
+            resume_job.assert_called_once_with(
+                job_dir=attempt_job,
+                results_root=Path(directory) / "results",
+                runtime="podman",
+            )
+            execute_job.assert_not_called()
 
     def test_tier_validation_rejects_missing_task(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,9 +1,9 @@
-# Terminal Bench Mini
+# Terminal-Bench-Mini-20
 
-Terminal Bench Mini is a 20-task, computing-focused subset of Terminal-Bench
-2.1 for evaluating local models and quantizations. It checks whether a model
-can remain coherent, use a terminal, write and debug code, configure services,
-and finish multi-step work. It is not an official Terminal-Bench 2.1 score.
+**Terminal-Bench-Mini-20** is a 20-task, computing-focused subset of
+Terminal-Bench 2.1 for evaluating local models and quantizations. It checks
+whether a model can remain coherent, use a terminal, write and debug code,
+configure services, and finish multi-step work.
 
 ## Task mix
 
@@ -45,27 +45,76 @@ the suite. The remaining tasks keep the benchmark practical on local hardware.
 
 ## Requirements
 
-- Linux with Docker Compose, or Podman with a Docker-compatible `docker` CLI;
-- Python 3.11 or newer;
-- [`uv`](https://docs.astral.sh/uv/) or an installed `harbor` command;
-- one OpenAI-compatible model endpoint.
+Install these host-side prerequisites:
 
-The first run downloads Harbor 0.20.0 and task container images. The 20 task
-definitions are vendored in `tasks/`; no separate Terminal-Bench checkout is
-required.
+- Linux and Python 3.11 or newer;
+- one container stack that the current user can run without `sudo`:
+  - Docker Engine with the Compose v2 `docker compose` command; or
+  - Podman with a Docker-compatible `docker` command and a Compose provider
+    such as `podman-compose`;
+- [`uv`](https://docs.astral.sh/uv/) (recommended), or an existing Harbor
+  0.20.0 installation that provides the `harbor` command.
+
+With `uv` or `uvx`, Harbor does not need to be installed manually. The runner
+resolves the pinned `harbor==0.20.0` package when it is first needed. The first
+real run also pulls the task container images, so allow outbound network access
+and enough free disk space for Python packages and container images.
+
+The OpenAI-compatible inference server must already be running and reachable
+from this host. The repository does not install the model, inference engine,
+GPU drivers, ROCm, CUDA, or Vulkan; those belong to the user's inference-server
+setup. The 20 task definitions are already vendored in `tasks/`, so no separate
+Terminal-Bench checkout or project-specific Python environment is required.
+
+Check a fresh host with:
+
+```bash
+python3 --version
+docker --version
+docker compose version
+uv --version  # Not needed when Harbor 0.20.0 is already installed.
+./terminal_bench.py doctor --endpoint http://localhost:8080/v1
+```
+
+Pass the real endpoint, model, or context-length options to `doctor` when they
+differ from the defaults. `doctor` queries `/models` and checks the local
+runtime, Harbor launch path, and vendored tasks without starting inference.
 
 ## Run
 
+### Agent-assisted setup
+
+After cloning the repository, you can ask a coding agent:
+
+> I want to run Terminal Bench.
+
+The root `AGENTS.md` tells the agent to collect the run details in one concise
+exchange, query the endpoint for its exact model ID and context capacity, run
+the non-inference `doctor` checks, and then present a complete command and run
+summary for confirmation. The agent should not start the benchmark until you
+have had a chance to correct the hardware, engine, backend, quantization, or
+other settings.
+
+Expect to provide the desired scope, endpoint, hardware platform, inference
+engine, compute backend, exact quantization or variant, and any special
+inference profile. For example, a platform might be `strix-halo`, `gb10`, or
+`r9700`, while a quantization might be `UD-Q4_K_XL`, `UD-IQ3_XXS`,
+`Q4_0_ROCMI4`, or `MXFP4`. The runner normally discovers the served model ID
+and context capacity itself.
+
+### Commands
+
 ```bash
 ./terminal_bench.py doctor
-./terminal_bench.py run --tier smoke \
-  --platform <platform> --engine <engine> --backend <compute-backend>
 ./terminal_bench.py run --tier full \
+  --platform <platform> --engine <engine> --backend <compute-backend>
+./terminal_bench.py run --tier smoke \
   --platform <platform> --engine <engine> --backend <compute-backend>
 ```
 
-The default endpoint is `http://localhost:8080/v1`. A complete local run might
-look like:
+The full 20-task tier is the default. The smoke tier exists only as an explicit
+quick validation. The default endpoint is `http://localhost:8080/v1`. A
+complete local run might look like:
 
 ```bash
 ./terminal_bench.py run --tier full \
@@ -75,7 +124,7 @@ look like:
   --engine llama.cpp \
   --backend rocm \
   --backend-version 7.14 \
-  --model-tag mtp \
+  --model-tag UD-Q4_K_XL \
   --inference-profile mtp
 ```
 
@@ -83,6 +132,9 @@ Every benchmark run must explicitly specify `--platform`, `--engine`, and
 `--backend`. These values have no defaults because they are separate parts of
 the recorded result identity:
 
+- `--platform` is the hardware platform that ran the model, such as
+  `strix-halo`; it is not the endpoint host. Do not use `localhost`, an IP
+  address, or a port as a platform identifier.
 - `--engine` is the inference server or implementation, such as `llama.cpp` or
   `DwarfStar`;
 - `--backend` is the compute backend used by that engine, such as `rocm`,
@@ -104,6 +156,11 @@ The runner discovers the model ID and context capacity from `/models`. Pass
 `--model` if the endpoint advertises more than one model, or `--context-length`
 if it does not advertise its capacity.
 
+Authentication is not normally needed for a local endpoint, so omit
+`--api-key` by default. If querying `/models` returns `401` or `403`, the
+endpoint requires authentication; set `TBENCH_API_KEY` or pass `--api-key` for
+that endpoint.
+
 When an endpoint exposes the same model ID for different quantizations or
 variants, pass the exact variant name with `--model-tag`. The full tag is
 recorded in result metadata and is included in both the Harbor job-directory
@@ -113,7 +170,9 @@ retain the same tag.
 Runs are sequential and allow up to two attempts per task. Attempt two runs
 only when attempt one fails. Terminus-2 summarizes context when it approaches
 the advertised limit. Each attempt has a three-hour agent timeout; there is no
-model-call, turn, or output-token cap. Use `--attempts 1` for strict pass@1.
+model-call, turn, or output-token cap. Results report the aggregate pass rate
+for the configured attempt budget: the default is pass@2, while
+`--attempts 1` produces pass@1.
 
 Interrupted jobs and existing failures can be continued without rerunning
 successful tasks:
