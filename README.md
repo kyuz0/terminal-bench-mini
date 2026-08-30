@@ -55,6 +55,10 @@ Install these host-side prerequisites:
 - [`uv`](https://docs.astral.sh/uv/) (recommended), or an existing Harbor
   0.20.0 installation that provides the `harbor` command.
 
+`tmux` is optional but strongly recommended for full runs, which commonly last
+many hours. It keeps the benchmark attached to a persistent terminal if the
+user disconnects and lets a local coding agent inspect the same live output.
+
 With `uv` or `uvx`, Harbor does not need to be installed manually. The runner
 resolves the pinned `harbor==0.20.0` package when it is first needed. The first
 real run also pulls the task container images, so allow outbound network access
@@ -91,9 +95,10 @@ After cloning the repository, you can ask a coding agent:
 The root `AGENTS.md` tells the agent to collect the run details in one concise
 exchange, query the endpoint for its exact model ID and context capacity, run
 the non-inference `doctor` checks, and then present a complete command and run
-summary for confirmation. The agent should not start the benchmark until you
-have had a chance to correct the hardware, engine, backend, quantization, or
-other settings.
+summary for confirmation. By default, the agent should give you the command and
+recommend that you run it yourself in a terminal or persistent `tmux` session.
+It may also offer to manage the run, but should do so only when asked and inside
+`tmux` or another persistent session.
 
 Expect to provide the desired scope, endpoint, hardware platform, inference
 engine, compute backend, exact quantization or variant, and any special
@@ -123,7 +128,7 @@ complete local run might look like:
   --platform-name "AMD Strix Halo" \
   --engine llama.cpp \
   --backend rocm \
-  --backend-version 7.14 \
+  --backend-version 10.0 \
   --model-tag UD-Q4_K_XL \
   --inference-profile mtp
 ```
@@ -174,6 +179,27 @@ model-call, turn, or output-token cap. Results report the aggregate pass rate
 for the configured attempt budget: the default is pass@2, while
 `--attempts 1` produces pass@1.
 
+### Running in tmux
+
+A full run is best started by the user in a persistent terminal:
+
+```bash
+tmux new-session -s terminal-bench-mini
+# Paste the generated ./terminal_bench.py run ... command.
+```
+
+Detach without stopping the benchmark by pressing `Ctrl-b`, then `d`. Reattach
+later with:
+
+```bash
+tmux attach-session -t terminal-bench-mini
+```
+
+If a coding agent starts the benchmark for you, it should report the tmux
+session name and generated `jobs/<job-name>` directory. Those give the agent
+both the live terminal output and durable result artifacts when you later ask
+for a status update.
+
 Interrupted jobs and existing failures can be continued without rerunning
 successful tasks:
 
@@ -188,6 +214,12 @@ Raw Harbor jobs are written to `jobs/`. Stable results are written to
 `results/<platform>/<model>_results/`, with one result and copied ATIF
 transcript per task. Quantization strings are retained in model and directory
 names. The exact inference engine and compute backend are recorded separately.
+
+When a run or resumed job produces a Harbor `result.json`, the runner
+automatically exports the normalized task results, writes the aggregate
+`summary.json`, and rebuilds `results/index.json`. No separate result-generation
+command is normally required. Use these commands to inspect a raw job or
+rebuild the aggregate index from existing exported results:
 
 ```bash
 ./terminal_bench.py summary jobs/<job-name>
@@ -210,12 +242,13 @@ reference point.
 
 ### Results explorer
 
-The static web UI in `docs/` provides searchable model cards, pass@1 and
-pass-within-attempt comparisons, a cross-model task matrix, task metadata,
+The static web UI in `docs/` provides searchable model cards, aggregate pass@N
+results and per-attempt breakdowns, a cross-model task matrix, task metadata,
 timings, token usage, failure classifications, verifier excerpts, run profiles,
 and links to committed results and transcripts.
 
-Regenerate its compact dataset after exporting or committing new results:
+After a run exports new results, regenerate the explorer's compact dataset and
+serve the repository root:
 
 ```bash
 python3 docs/build_data.py
@@ -223,11 +256,13 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000/docs/` to preview it. The site is dependency-free
-and can be published directly with GitHub Pages using `docs/` as the source.
-Local `jobs/` directories do not need to be committed: when present, the data
-builder extracts short verifier evidence into `docs/data.json`, while public
-links target normalized artifacts under `results/` and task definitions under
-`tasks/`.
+and requires no Node.js, npm, or frontend build. Run `docs/build_data.py` again
+after each new export; the running HTTP server will then serve the updated
+`docs/data.json`. Local `jobs/` directories do not need to be committed: when
+present, the data builder extracts short verifier evidence into
+`docs/data.json`, while links target normalized artifacts under `results/` and
+task definitions under `tasks/`. Publishing or committing results is separate
+from local visualization and should be done only when intended.
 
 ## Layout
 

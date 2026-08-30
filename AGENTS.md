@@ -8,6 +8,17 @@ quantizations. It tests medium- to long-horizon agentic workflows in which a
 model uses terminal tools, writes and debugs code, configures systems, and
 completes multi-step tasks.
 
+## User communication
+
+Keep every user-facing response direct and brief.
+
+- Prefer short bullet points or a compact table.
+- Lead with the command, result, or current status.
+- Ask all required questions together; do not drip-feed them.
+- Do not narrate routine actions, repeat known context, or add unrequested
+  background.
+- Explain only what the user needs to choose, run, fix, or understand next.
+
 ## Benchmark invariants
 
 - `subsets/full.txt` is the canonical 20-task set; `subsets/smoke.txt` is the
@@ -148,7 +159,93 @@ Before execution, show the user:
 3. a reminder that a full run can take many hours and that settings can still
    be corrected or clarified.
 
-Do not start a real benchmark until the user confirms the summarized command.
+The default handoff is to give the user the command and recommend that they run
+it themselves in a terminal, preferably inside `tmux`. Include concise tmux
+instructions when useful. Ensure every shell continuation backslash is the last
+character on its line so the command is genuinely copy-pasteable.
+
+Offer to run and monitor the command for the user, but do not treat approval of
+the command's settings as approval for agent-managed execution. Start it only
+when the user explicitly asks the agent to run it. An agent-managed full run
+must use a persistent `tmux` session or an equivalent persistent supervisor,
+never a transient tool shell. Run it from the repository root, report the
+session name, capture the generated job name and `jobs/<job-name>` path, and
+verify that Harbor actually started. If tmux is unavailable, explain the
+alternative before launching.
+
+## Running and status updates
+
+When the user asks for an update, inspect both the live session and durable job
+artifacts. For a tmux-managed run, use `tmux list-sessions` and capture the
+relevant pane. Identify the exact job from the startup output or
+`jobs/<job-name>/runner-meta.json`, then inspect its `result.json` and task-local
+artifacts. Do not rely on the progress bar alone.
+
+Interpret Harbor output carefully:
+
+- `11/20 Mean: 1.000` means 11 trials have completed and the mean reward among
+  the completed trials is currently 1.0. It is not the final 20-task score;
+- a line such as `litellm.Timeout ... timeout value=600.0` records a timed-out
+  model request. It is not automatically a failed task or stopped benchmark;
+  if later progress appears, the overall run continued. Use the task result and
+  exception artifacts before classifying the outcome;
+- `1:35:27 build-pov-ray... running agent` is the elapsed time for the current
+  task. Sparse output during a long task is not proof that it is stuck; and
+- `-:--:--` means Harbor has no usable ETA.
+
+A useful status update states:
+
+- whether the tmux session, Harbor process, and relevant task container are
+  active;
+- the current attempt round and exact job directory;
+- completed tasks versus total tasks, the current task, and its elapsed time;
+- confirmed passes among completed tasks, clearly labelled as provisional until
+  the configured attempt budget finishes;
+- observed timeouts or errors and whether the run subsequently progressed; and
+- whether a conditional second-attempt job is pending, running, or complete.
+
+Use coarse checks rather than continuous polling. Do not call a benchmark
+finished merely because attempt one ended: with the default policy, Harbor may
+move into a separate `-attempt2` job for failed tasks. Treat the run as complete
+only after the configured attempt policy has finished and the normalized result
+set has been exported.
+
+## Results and visualization
+
+A completed run or resumed Harbor job automatically exports normalized results
+under `results/<platform>/<model>_results/`, writes that result set's
+`summary.json`, and rebuilds `results/index.json`. Do not hand-edit any of these
+artifacts. `./terminal_bench.py results` is available to rebuild the aggregate
+index from already exported result sets; it is not normally needed after a
+successful automatic export.
+
+At the end of a run, give the user a compact result summary containing:
+
+- the exact platform, served model ID, model tag or quantization, engine,
+  backend, and configured attempt budget;
+- the aggregate passed/total count and pass@N rate for that attempt budget;
+- the result directory and raw Harbor job directory;
+- failed or errored tasks, clearly distinguishing verifier, agent-timeout, and
+  harness or endpoint errors when the artifacts support that distinction; and
+- timing and token totals when available.
+
+Do not present an interrupted or partially exported job as a final aggregate.
+Use `./terminal_bench.py summary jobs/<job-name>` for raw-job status and
+`./terminal_bench.py resume jobs/<job-name>` when the user wants to continue it.
+
+To generate the local results explorer after an export, run from the repository
+root:
+
+```bash
+python3 docs/build_data.py
+python3 -m http.server 8000
+```
+
+Tell the user to open `http://localhost:8000/docs/`. The viewer is static and
+has no Node.js or npm dependency. Re-run `python3 docs/build_data.py` after each
+new result export; an already-running HTTP server will serve the regenerated
+dataset. If port 8000 is occupied, select another port and report the matching
+URL. Do not publish, commit, or push results unless the user asks.
 
 ## Validation
 
