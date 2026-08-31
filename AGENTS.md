@@ -116,17 +116,22 @@ Collect or confirm:
   version or commit when known;
 - the compute backend, such as `rocm-10.0`, `vulkan`, `cuda`, `metal`, or `cpu`, and
   its version when known;
-- the exact quantization or variant label that should identify the run. Pass it
-  as `--model-tag`; examples include `UD-Q4_K_XL`, `UD-IQ3_XXS`,
-  `Q4_0_ROCMI4`, `MXFP4`, and longer custom quant names;
+- the exact quantization or subvariant label that should identify the run. Pass
+  only that suffix as `--model-tag`, never the complete model-file name or its
+  extension. For example, derive
+  `IQ2XXS-w2Q2K-AProjQ4-SExpQ8-OutQ8-chat-v2-imatrix-0731` from
+  `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ4-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf`.
+  Other examples include `UD-Q4_K_XL`, `UD-IQ3_XXS`, `Q4_0_ROCMI4`, and `MXFP4`;
 - any special inference profile, such as MTP/DSpark or `mtp16/dspark6`, separately from the
   quantization label.
 
 Use the endpoint's `/models` response to discover the served model ID and
-context capacity. `--model` must be the exact advertised ID, even when it is a
-full model-file path. If the endpoint advertises multiple models, show the
-available IDs and ask the user to select one. Ask for `--context-length` only
-when the selected model's metadata does not advertise it.
+context capacity. The runner discovers and records the endpoint-advertised
+maximum automatically: never include `--context-length` in a CLI command
+unless the user explicitly asks for an override. `--model` must be the exact
+advertised ID, even when it is a full model-file path. If the endpoint
+advertises multiple models, show the available IDs and ask the user to select
+one. Warn the user when the advertised maximum context is below 262,144 tokens.
 
 Do not begin by asking about `TBENCH_API_KEY`, and omit `--api-key` from normal
 local commands. The runner's default placeholder is suitable for
@@ -136,10 +141,10 @@ user to configure `TBENCH_API_KEY` or provide `--api-key`. Do not echo or repeat
 a secret supplied through the environment.
 
 Once the endpoint details are resolved, run `./terminal_bench.py doctor` with
-the applicable `--endpoint`, `--model`, and `--context-length` arguments. This
-validates the endpoint, model metadata, container runtime, Harbor availability,
-and vendored tasks without running inference. Resolve any failed prerequisite
-before proposing a real run.
+the applicable `--endpoint` and `--model` arguments. This validates the
+endpoint, model metadata, container runtime, Harbor availability, and vendored
+tasks without running inference. Resolve any failed prerequisite before
+proposing a real run.
 
 Unless the user explicitly overrides them, preserve the benchmark defaults:
 
@@ -147,6 +152,9 @@ Unless the user explicitly overrides them, preserve the benchmark defaults:
 - up to `2` attempts per task, with the second attempt only after failure;
 - a three-hour agent timeout per attempt;
 - automatic container cleanup after each task.
+
+Do not include default-valued `--agent-timeout` in a command. Include it only
+when the user explicitly chooses a non-default timeout.
 
 Before execution, show the user:
 
@@ -209,7 +217,7 @@ finished merely because attempt one ended: with the default policy, Harbor may
 move into a separate `-attempt2` job for failed tasks. Treat the run as complete
 only after the configured attempt policy has finished and the normalized result
 set has been exported.
-
+on ocm 10.0
 ## Results and visualization
 
 A completed run or resumed Harbor job automatically exports normalized results
@@ -258,13 +266,13 @@ python3 -m unittest discover -s tests -v
 ./terminal_bench.py results
 ```
 
-To validate configuration and container discovery without running inference:
+To validate configuration and container discovery without running inference,
+using a reachable endpoint that advertises the selected model:
 
 ```bash
 ./terminal_bench.py run --tier smoke \
-  --skip-endpoint-check \
-  --model test/local-model-Q4_K_M.gguf \
-  --context-length 262144 \
+  --endpoint <endpoint> \
+  --model <advertised-model-id> \
   --platform test-local \
   --engine llama.cpp \
   --backend rocm \
