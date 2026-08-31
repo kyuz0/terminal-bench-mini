@@ -177,27 +177,45 @@ def harbor_model_name(raw_model: str) -> str:
 def make_job_name(
     tier: str,
     model: str,
-    model_tag: str | None = None,
+    quant: str | None = None,
     *,
     engine: str | None = None,
     backend: str | None = None,
+    inference_profile: str | None = None,
+    tag: str | None = None,
 ) -> str:
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     identity_parts = [model]
-    if model_tag:
-        identity_parts.append(model_tag)
+    identity_parts.extend(value for value in (quant, inference_profile, tag) if value)
     identity_parts.extend(value for value in (engine, backend) if value)
     identity = "--".join(identity_parts)
     slug = result_store.stable_slug(identity, limit=140)
     return f"{stamp}-terminal-bench-local-{tier}-{AGENT_NAME}-{slug}"
 
 
-def result_tag(model_tag: str | None, engine: str, backend: str) -> str:
+def result_tag(
+    quant: str | None,
+    engine: str,
+    backend: str,
+    inference_profile: str | None = None,
+    tag: str | None = None,
+) -> str:
     parts = [engine, backend]
-    if model_tag:
-        parts.append(model_tag)
+    parts.extend(value for value in (quant, inference_profile, tag) if value)
     parts.append(AGENT_NAME)
     return "-".join(parts)
+
+
+def run_identity_args(
+    args: argparse.Namespace,
+) -> tuple[str, str | None, str | None, str | None]:
+    model_name = str(args.model_name or "").strip()
+    if not model_name:
+        raise RunnerError("--model-name must be non-empty")
+    quant = str(args.quant or "").strip() or None
+    inference_profile = str(args.inference_profile or "").strip() or None
+    tag = str(args.tag or "").strip() or None
+    return model_name, quant, inference_profile, tag
 
 
 def model_context_length(
@@ -231,7 +249,9 @@ def evaluation_profile(
     engine_version: str | None,
     backend: str,
     backend_version: str | None,
+    quant: str | None,
     inference_profile: str | None,
+    tag: str | None,
     context_length: int,
     agent_timeout_seconds: int,
 ) -> dict[str, Any]:
@@ -247,7 +267,9 @@ def evaluation_profile(
         "engine_version": engine_version,
         "backend": backend,
         "backend_version": backend_version,
+        "quant": quant,
         "inference_profile": inference_profile,
+        "tag": tag,
         "agent": {
             "name": AGENT_NAME,
             "version": AGENT_VERSION,
@@ -268,13 +290,15 @@ def make_run_meta(
     platform: str,
     platform_name: str | None,
     model: str,
+    model_name: str,
     model_metadata: dict[str, Any],
     engine: str,
     engine_version: str | None,
     backend: str,
     backend_version: str | None,
-    model_tag: str | None,
+    quant: str | None,
     inference_profile: str | None,
+    tag: str | None,
     endpoint: str,
     runtime: str,
     runtime_description: str,
@@ -295,7 +319,7 @@ def make_run_meta(
         "task_list_hash": hashlib.sha256("\n".join(requested_tasks).encode()).hexdigest(),
         "platform": {"id": platform, "name": platform_name or platform},
         "model": {
-            "name": result_store.model_name(model),
+            "name": model_name,
             "id": model,
             "endpoint_metadata": model_metadata,
         },
@@ -303,9 +327,10 @@ def make_run_meta(
         "engine_version": engine_version,
         "backend": backend,
         "backend_version": backend_version,
-        "model_tag": model_tag,
-        "result_tag": result_tag(model_tag, engine, backend),
+        "quant": quant,
         "inference_profile": inference_profile,
+        "tag": tag,
+        "result_tag": result_tag(quant, engine, backend, inference_profile, tag),
         "endpoint": endpoint,
         "container_runtime": {"type": runtime, "description": runtime_description},
         "job_name": job_name,
@@ -664,9 +689,11 @@ def retry_failed(args: argparse.Namespace) -> int:
     base_name = args.job_name or make_job_name(
         "retry",
         model,
-        meta.get("model_tag"),
+        result_store.metadata_quant(meta),
         engine=runtime_identity.get("engine"),
         backend=runtime_identity.get("backend"),
+        inference_profile=result_store.metadata_inference_profile(meta),
+        tag=meta.get("tag"),
     )
     retry_meta = copy.deepcopy(meta)
     retry_meta.update(
@@ -784,6 +811,11 @@ def add_result_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--platform-name")
     parser.add_argument(
+        "--model-name",
+        required=True,
+        help="Canonical human-readable model family/revision (required)",
+    )
+    parser.add_argument(
         "--engine",
         required=True,
         help="Inference engine/server implementation, for example llama.cpp or DwarfStar (required)",
@@ -795,12 +827,19 @@ def add_result_args(parser: argparse.ArgumentParser) -> None:
         help="Compute backend used by the engine, for example rocm, vulkan, cuda, metal or cpu (required)",
     )
     parser.add_argument("--backend-version")
-    parser.add_argument("--model-tag")
+    parser.add_argument(
+        "--quant",
+        help="Quantization or numeric-format variant only, for example UD-Q4_K_XL",
+    )
     parser.add_argument(
         "--rocm-version",
         help="Deprecated alias for --backend-version; valid only with --backend rocm",
     )
     parser.add_argument("--inference-profile")
+    parser.add_argument(
+        "--tag",
+        help="Optional non-quant, non-profile variant label",
+    )
 
 
 def runtime_args(args: argparse.Namespace) -> tuple[str, str | None, str, str | None]:
@@ -935,6 +974,7 @@ def main(argv: list[str] | None = None) -> int:
         if run_runtime is None:
             raise RunnerError(f"Unsupported command: {args.command}")
         engine, engine_version, backend, backend_version = run_runtime
+        model_name, quant, inference_profile, tag = run_identity_args(args)
         if args.attempts < 1 or args.concurrency < 1 or args.agent_timeout < 1:
             raise RunnerError("--attempts, --concurrency and --agent-timeout must be positive")
         tier = "task" if args.task else args.tier
@@ -950,7 +990,9 @@ def main(argv: list[str] | None = None) -> int:
             engine_version=engine_version,
             backend=backend,
             backend_version=backend_version,
-            inference_profile=args.inference_profile,
+            quant=quant,
+            inference_profile=inference_profile,
+            tag=tag,
             context_length=context_length,
             agent_timeout_seconds=args.agent_timeout,
         )
@@ -960,7 +1002,7 @@ def main(argv: list[str] | None = None) -> int:
             results_root,
             args.platform,
             model,
-            result_tag(args.model_tag, engine, backend),
+            result_tag(quant, engine, backend, inference_profile, tag),
         )
         cached = [] if args.rerun else result_store.cached_tasks(
             model_dir, requested, profile_hash
@@ -974,9 +1016,11 @@ def main(argv: list[str] | None = None) -> int:
         job_name = args.job_name or make_job_name(
             tier,
             model,
-            args.model_tag,
+            quant,
             engine=engine,
             backend=backend,
+            inference_profile=inference_profile,
+            tag=tag,
         )
         meta = make_run_meta(
             job_name=job_name,
@@ -986,13 +1030,15 @@ def main(argv: list[str] | None = None) -> int:
             platform=args.platform,
             platform_name=args.platform_name,
             model=model,
+            model_name=model_name,
             model_metadata=metadata,
             engine=engine,
             engine_version=engine_version,
             backend=backend,
             backend_version=backend_version,
-            model_tag=args.model_tag,
-            inference_profile=args.inference_profile,
+            quant=quant,
+            inference_profile=inference_profile,
+            tag=tag,
             endpoint=args.endpoint,
             runtime=runtime,
             runtime_description=runtime_description,
@@ -1021,6 +1067,11 @@ def main(argv: list[str] | None = None) -> int:
             f"Compute backend:    {backend}"
             f"{f' {backend_version}' if backend_version else ''}"
         )
+        print(f"Display model:      {model_name}")
+        print(f"Quant:              {quant or 'not specified'}")
+        print(f"Inference profile:  {inference_profile or 'default / not specified'}")
+        if tag:
+            print(f"Tag:                {tag}")
         print(f"Attempts:           up to {args.attempts}; stop after first pass")
         print(f"Concurrency:        {args.concurrency}")
         print(f"Agent:              {AGENT_NAME} {AGENT_VERSION}")

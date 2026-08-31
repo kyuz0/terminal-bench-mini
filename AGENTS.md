@@ -116,14 +116,19 @@ Collect or confirm:
   version or commit when known;
 - the compute backend, such as `rocm-10.0`, `vulkan`, `cuda`, `metal`, or `cpu`, and
   its version when known;
-- the exact quantization or subvariant label that should identify the run. Pass
-  only that suffix as `--model-tag`, never the complete model-file name or its
-  extension. For example, derive
-  `IQ2XXS-w2Q2K-AProjQ4-SExpQ8-OutQ8-chat-v2-imatrix-0731` from
-  `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ4-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf`.
-  Other examples include `UD-Q4_K_XL`, `UD-IQ3_XXS`, `Q4_0_ROCMI4`, and `MXFP4`;
-- any special inference profile, such as MTP/DSpark or `mtp16/dspark6`, separately from the
-  quantization label.
+- the canonical human-readable model family and revision for `--model-name`.
+  Keep it identical across quants and inference profiles, and exclude file
+  extensions, shard numbers, quantization, inference profiles, and experimental
+  tags. For example, every applicable variant is `DeepSeek-V4-Flash-0731`;
+- the exact numeric format or quantization for `--quant`, such as
+  `UD-Q4_K_XL`, `UD-IQ3_XXS`, `Q4_0_ROCMI4`, `MXFP4`, or
+  `IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8`. Never put a complete model filename,
+  model-family prefix, shard suffix, inference profile, or free-form tag here;
+- any special inference profile for `--inference-profile`, such as `mtp`,
+  `mtp16`, or `DSpark`, separately from quantization; and
+- an optional `--tag` only for remaining variant information such as
+  `chat-v2-imatrix-0731`. Never use `--tag` for quantization or inference
+  profile. Omit it when no additional distinction is needed.
 
 Use the endpoint's `/models` response to discover the served model ID and
 context capacity. The runner discovers and records the endpoint-advertised
@@ -159,9 +164,9 @@ when the user explicitly chooses a non-default timeout.
 Before execution, show the user:
 
 1. a compact summary of the tier and task count, endpoint, exact model ID,
-   context length, hardware platform, engine and version, backend and version,
-   quantization/model tag, inference profile, attempts, concurrency, timeout,
-   and conditional-retry behavior;
+   context length, canonical model name, hardware platform, engine and version,
+   backend and version, quantization, inference profile, optional tag, attempts,
+   concurrency, timeout, and conditional-retry behavior;
 2. the complete copy-pasteable `./terminal_bench.py run ...` command, with the
    tier and identity fields explicit; and
 3. a reminder that a full run can take many hours and that settings can still
@@ -229,8 +234,8 @@ successful automatic export.
 
 At the end of a run, give the user a compact result summary containing:
 
-- the exact platform, served model ID, model tag or quantization, engine,
-  backend, and configured attempt budget;
+- the exact platform, canonical model name, served model ID, quantization,
+  inference profile, optional tag, engine, backend, and configured attempt budget;
 - the aggregate passed/total count and pass@N rate for that attempt budget;
 - the result directory and raw Harbor job directory;
 - failed or errored tasks, clearly distinguishing verifier, agent-timeout, and
@@ -274,6 +279,7 @@ using a reachable endpoint that advertises the selected model:
   --endpoint <endpoint> \
   --model <advertised-model-id> \
   --platform test-local \
+  --model-name test-model \
   --engine llama.cpp \
   --backend rocm \
   --backend-version test \
@@ -288,7 +294,8 @@ suite can consume many hours of local inference.
 ```bash
 # Run the full 20-task set
 ./terminal_bench.py run --tier full \
-  --platform <platform> --engine <engine> --backend <compute-backend> [model options]
+  --platform <platform> --model-name <canonical-model-name> \
+  --engine <engine> --backend <compute-backend> [model options]
 
 # Continue an interrupted Harbor job
 ./terminal_bench.py resume jobs/<job-name>

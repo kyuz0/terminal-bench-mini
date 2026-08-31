@@ -59,7 +59,9 @@ class DocsDataTests(unittest.TestCase):
             self.assertIn("engine", model)
             self.assertIn("backend", model)
             self.assertIn("backendVersion", model)
-            self.assertIn("modelTag", model)
+            self.assertIn("quant", model)
+            self.assertIn("inferenceProfile", model)
+            self.assertIn("tag", model)
             self.assertEqual(model["passAt1"], sum(result["passAt1"] for result in model["results"]))
             self.assertLessEqual(model["passAt1"], model["passedWithinAttempts"])
 
@@ -78,18 +80,33 @@ class DocsDataTests(unittest.TestCase):
         ]
         self.assertTrue(dwarfstar_runs)
         self.assertTrue(all(model["backend"] == "rocm" for model in dwarfstar_runs))
-        self.assertTrue(
-            all(model["backendVersion"] == "7.14" for model in dwarfstar_runs)
+        self.assertEqual(
+            {model["backendVersion"] for model in dwarfstar_runs}, {"7.14", "10.0"}
         )
 
         qwen_baseline = next(
             model
             for model in dataset["models"]
-            if model["name"] == "Qwen3.6-35B-A3B-UD-Q4_K_XL"
+            if model["name"] == "Qwen3.6-35B-A3B"
         )
+        self.assertEqual(qwen_baseline["quant"], "UD-Q4_K_XL")
         self.assertEqual(qwen_baseline["engine"], "llama.cpp")
         self.assertEqual(qwen_baseline["backend"], "rocm")
         self.assertEqual(qwen_baseline["backendVersion"], "7.14")
+
+        deepseek_runs = [
+            model for model in dataset["models"] if model["name"] == "DeepSeek-V4-Flash-0731"
+        ]
+        self.assertEqual(len(deepseek_runs), 3)
+        self.assertEqual(
+            {model["quant"] for model in deepseek_runs},
+            {"MXFP4", "UD-IQ3_XXS", "IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8"},
+        )
+        dspark = next(model for model in deepseek_runs if model["inferenceProfile"] == "DSpark")
+        self.assertEqual(dspark["tag"], "chat-v2-imatrix-0731")
+
+        qwen38_runs = [model for model in dataset["models"] if model["name"] == "Qwen3.8-27B"]
+        self.assertEqual(len(qwen38_runs), 3)
 
     def test_dataset_includes_task_instructions_but_never_solution_paths(self):
         dataset = build_data.build_dataset(REPO_ROOT, "kyuz0/terminal-bench-local")

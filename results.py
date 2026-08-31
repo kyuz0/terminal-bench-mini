@@ -13,7 +13,7 @@ import shutil
 from typing import Any
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def utc_now() -> str:
@@ -116,6 +116,21 @@ def runtime_identity(metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def metadata_quant(metadata: dict[str, Any]) -> str | None:
+    """Return the dedicated quant field, with a schema-v2 fallback."""
+    value = metadata.get("quant")
+    if value is None:
+        value = metadata.get("model_tag")
+    return str(value) if value else None
+
+
+def metadata_inference_profile(metadata: dict[str, Any]) -> str | None:
+    value = metadata.get("inference_profile")
+    if value is None:
+        value = (metadata.get("evaluation_profile") or {}).get("inference_profile")
+    return str(value) if value else None
+
+
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -131,11 +146,11 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def model_results_dir(
-    results_root: Path, platform: str, model_id: str, model_tag: str | None
+    results_root: Path, platform: str, model_id: str, identity_tag: str | None
 ) -> Path:
     directory = stable_slug(model_id)
-    if model_tag:
-        tag = re.sub(r"[^a-zA-Z0-9._-]+", "-", model_tag).strip("-.")
+    if identity_tag:
+        tag = re.sub(r"[^a-zA-Z0-9._-]+", "-", identity_tag).strip("-.")
         directory += f"-{(tag or 'tag')[:48]}"
     return results_root / path_slug(platform, limit=48) / f"{directory}_results"
 
@@ -281,7 +296,9 @@ def summarize_model_dir(model_dir: Path, run_meta: dict[str, Any]) -> dict[str, 
         "platform": run_meta["platform"],
         "model": run_meta["model"],
         **runtime,
-        "model_tag": run_meta.get("model_tag"),
+        "quant": metadata_quant(run_meta),
+        "inference_profile": metadata_inference_profile(run_meta),
+        "tag": run_meta.get("tag"),
         "result_tag": run_meta.get("result_tag"),
         "total_tasks": len(attempted),
         "passed_tasks": passed,
@@ -316,7 +333,7 @@ def rebuild_index(results_root: Path) -> dict[str, Any]:
                 meta = read_json(meta_path)
                 summary = summarize_model_dir(model_dir, meta)
                 model_key = f"{platform['id']}::{meta['model']['id']}"
-                identity_tag = meta.get("result_tag") or meta.get("model_tag")
+                identity_tag = meta.get("result_tag") or metadata_quant(meta)
                 if identity_tag:
                     model_key += f"::{identity_tag}"
                 models.append(
@@ -325,7 +342,8 @@ def rebuild_index(results_root: Path) -> dict[str, Any]:
                         "result_directory": relative_to_repo(model_dir, results_root),
                         **{key: summary.get(key) for key in (
                             "platform", "model", "engine", "engine_version", "backend",
-                            "backend_version", "model_tag", "result_tag", "total_tasks",
+                            "backend_version", "quant", "inference_profile", "tag",
+                            "result_tag", "total_tasks",
                             "passed_tasks", "pass_rate", "total_duration_ms", "tokens",
                         )},
                     }
@@ -365,6 +383,10 @@ def export_job(
     results_root = results_root.resolve()
     run_meta = {**run_meta, "model": dict(run_meta["model"])}
     run_meta.update(runtime_identity(run_meta))
+    run_meta["quant"] = metadata_quant(run_meta)
+    run_meta["inference_profile"] = metadata_inference_profile(run_meta)
+    run_meta.setdefault("tag", None)
+    run_meta.pop("model_tag", None)
     run_meta["model"].setdefault("name", model_name(run_meta["model"]["id"]))
     platform = run_meta["platform"]
     model = run_meta["model"]
@@ -372,7 +394,7 @@ def export_job(
         results_root,
         platform["id"],
         model["id"],
-        run_meta.get("result_tag") or run_meta.get("model_tag"),
+        run_meta.get("result_tag") or run_meta.get("quant"),
     )
     model_dir.mkdir(parents=True, exist_ok=True)
     write_json(results_root / path_slug(platform["id"], limit=48) / "platform.json", platform)
@@ -469,7 +491,9 @@ def export_job(
             "engine_version": run_meta.get("engine_version"),
             "backend": run_meta.get("backend"),
             "backend_version": run_meta.get("backend_version"),
-            "model_tag": run_meta.get("model_tag"),
+            "quant": run_meta.get("quant"),
+            "inference_profile": run_meta.get("inference_profile"),
+            "tag": run_meta.get("tag"),
             "result_tag": run_meta.get("result_tag"),
             "evaluation_profile": run_meta["evaluation_profile"],
             "profile_hash": run_meta["profile_hash"],

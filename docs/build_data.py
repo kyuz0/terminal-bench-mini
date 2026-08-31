@@ -256,12 +256,25 @@ def model_record(repo_root: Path, result_dir: Path, repository: str) -> dict:
         or endpoint_metadata.get("context_length")
         or endpoint_meta.get("n_ctx")
     )
+    quant = (
+        run_meta.get("quant")
+        or summary.get("quant")
+        or run_meta.get("model_tag")
+        or summary.get("model_tag")
+    )
+    inference_profile = (
+        run_meta.get("inference_profile")
+        or summary.get("inference_profile")
+        or profile.get("inference_profile")
+    )
 
     return {
         "id": relative_dir,
         "name": model.get("name") or summary.get("model", {}).get("name"),
         "modelId": model.get("id") or profile.get("model_id"),
-        "modelTag": run_meta.get("model_tag", summary.get("model_tag")),
+        "quant": quant,
+        "inferenceProfile": inference_profile,
+        "tag": run_meta.get("tag", summary.get("tag")),
         "resultTag": run_meta.get("result_tag", summary.get("result_tag")),
         "platform": platform,
         "engine": engine,
@@ -269,7 +282,6 @@ def model_record(repo_root: Path, result_dir: Path, repository: str) -> dict:
         "backend": backend,
         "backendVersion": backend_version,
         "endpointOwner": endpoint_metadata.get("owned_by"),
-        "inferenceProfile": profile.get("inference_profile"),
         "contextLength": context_length,
         "modelSizeBytes": endpoint_meta.get("size"),
         "parameterCount": endpoint_meta.get("n_params"),
@@ -319,7 +331,7 @@ def build_dataset(repo_root: Path, repository: str) -> dict:
     exported_times = [model.get("exportedAt") for model in models if model.get("exportedAt")]
     generated_at = max(exported_times) if exported_times else datetime.now(timezone.utc).isoformat()
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "generatedAt": generated_at,
         "repository": repository,
         "benchmark": {

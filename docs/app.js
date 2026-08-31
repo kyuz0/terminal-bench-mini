@@ -5,6 +5,10 @@ const state = {
   selectedModels: new Set(),
   filters: {
     search: "",
+    model: "",
+    quant: "",
+    profile: "",
+    tag: "",
     platform: "",
     engine: "",
     backend: "",
@@ -21,6 +25,10 @@ const elements = {
   introFacts: document.querySelector("#intro-facts"),
   timestamp: document.querySelector("#data-timestamp"),
   search: document.querySelector("#search"),
+  model: document.querySelector("#model-filter"),
+  quant: document.querySelector("#quant-filter"),
+  profile: document.querySelector("#profile-filter"),
+  tag: document.querySelector("#tag-filter"),
   platform: document.querySelector("#platform-filter"),
   engine: document.querySelector("#engine-filter"),
   backend: document.querySelector("#backend-filter"),
@@ -119,12 +127,13 @@ function formatDate(value) {
 }
 
 function modelLabel(model) {
-  return model.modelTag ? `${model.name} · ${model.modelTag}` : model.name;
+  return [model.name, model.quant, model.inferenceProfile, model.tag].filter(Boolean).join(" · ");
 }
 
 function shortModelLabel(model) {
-  if (model.modelTag) return `${model.name} / ${model.modelTag}`;
-  return `${model.name} / tag not recorded`;
+  return [model.name, model.quant || "quant not recorded", model.inferenceProfile, model.tag]
+    .filter(Boolean)
+    .join(" / ");
 }
 
 function outcomeLabel(type) {
@@ -159,7 +168,8 @@ function modelSearchBlob(model) {
   return [
     model.name,
     model.modelId,
-    model.modelTag,
+    model.quant,
+    model.tag,
     model.quantizationType,
     model.engine,
     model.engineVersion,
@@ -174,6 +184,10 @@ function modelSearchBlob(model) {
 
 function visibleModels() {
   const models = state.data.models.filter((model) => {
+    if (state.filters.model && model.name !== state.filters.model) return false;
+    if (state.filters.quant && model.quant !== state.filters.quant) return false;
+    if (state.filters.profile && model.inferenceProfile !== state.filters.profile) return false;
+    if (state.filters.tag && model.tag !== state.filters.tag) return false;
     if (state.filters.platform && model.platform.id !== state.filters.platform) return false;
     if (state.filters.engine && model.engine !== state.filters.engine) return false;
     if (state.filters.backend && model.backend !== state.filters.backend) return false;
@@ -265,6 +279,10 @@ function renderIntro() {
 }
 
 function renderFilters() {
+  fillSelect(elements.model, uniqueOptions(state.data.models.map((model) => model.name)));
+  fillSelect(elements.quant, uniqueOptions(state.data.models.map((model) => model.quant)));
+  fillSelect(elements.profile, uniqueOptions(state.data.models.map((model) => model.inferenceProfile)));
+  fillSelect(elements.tag, uniqueOptions(state.data.models.map((model) => model.tag)));
   fillSelect(elements.platform, uniqueOptions(state.data.models.map((model) => model.platform.id)));
   for (const option of [...elements.platform.options]) {
     if (!option.value) continue;
@@ -292,7 +310,7 @@ function renderSummary(tasks, models) {
 function renderModels() {
   const models = visibleModels();
   if (!models.length) {
-    elements.modelGrid.innerHTML = '<div class="empty-state">No model runs match the platform, engine, and compute-backend filters.</div>';
+    elements.modelGrid.innerHTML = '<div class="empty-state">No model runs match the active identity and runtime filters.</div>';
     return;
   }
   elements.modelGrid.innerHTML = models.map((model) => {
@@ -304,7 +322,7 @@ function renderModels() {
         <div class="model-card-head">
           <div>
             <p class="model-name">${escapeHtml(model.name)}</p>
-            <p class="model-tag">${escapeHtml(model.modelTag || "quant/model tag not recorded")}</p>
+            <p class="model-tag">${escapeHtml(model.quant || "quant not recorded")}</p>
           </div>
           <button class="model-select" type="button" data-action="toggle-model" aria-label="${selected ? "Remove" : "Add"} ${escapeHtml(modelLabel(model))} ${selected ? "from" : "to"} comparison" aria-pressed="${selected}">${selected ? "✓" : ""}</button>
         </div>
@@ -313,6 +331,8 @@ function renderModels() {
           ${scoreBlock("pass@1", model.passAt1Rate)}
         </div>
         <div class="model-meta">
+          ${model.inferenceProfile ? `<span class="badge">profile ${escapeHtml(model.inferenceProfile)}</span>` : ""}
+          ${model.tag ? `<span class="badge">tag ${escapeHtml(model.tag)}</span>` : ""}
           <span class="badge">${escapeHtml(model.platform.name)}</span>
           <span class="badge">${escapeHtml(model.engine || "engine not recorded")}</span>
           <span class="badge">${escapeHtml(model.backend || "backend not recorded")}${model.backendVersion ? ` ${escapeHtml(model.backendVersion)}` : ""}</span>
@@ -340,6 +360,8 @@ function renderComparison(models) {
     ["Input tokens", (model) => formatExactNumber(model.totalTokens.input)],
     ["Output tokens", (model) => formatExactNumber(model.totalTokens.output)],
     ["Context", (model) => `${formatExactNumber(model.contextLength)} tokens`],
+    ["Quant", (model) => model.quant || "not recorded"],
+    ["Tag", (model) => model.tag || "not set"],
     ["Platform", (model) => `${model.platform.name} (${model.platform.id})`],
     ["Engine", (model) => `${model.engine || "not recorded"}${model.engineVersion ? ` ${model.engineVersion}` : ""}`],
     ["Compute backend", (model) => `${model.backend || "not recorded"}${model.backendVersion ? ` ${model.backendVersion}` : ""}`],
@@ -448,7 +470,8 @@ function openModelDetails(model, updateHash = true) {
         ${detailList([
           ["Display name", model.name, "mono"],
           ["Endpoint model ID", model.modelId, "mono"],
-          ["Quant/model tag", model.modelTag || "not recorded", "mono"],
+          ["Quant", model.quant || "not recorded", "mono"],
+          ["Tag", model.tag || "not set", "mono"],
           ["Endpoint quant type", model.quantizationType || "not recorded", "mono"],
           ["Parameters", model.parameterCount ? formatExactNumber(model.parameterCount) : "not recorded", "mono"],
           ["Model size", formatBytes(model.modelSizeBytes), "mono"],
@@ -549,7 +572,8 @@ function openResultDetails(model, task, result, updateHash = true) {
         <h3>Run</h3>
         ${detailList([
           ["Model", model.name, "mono"],
-          ["Quant/model tag", model.modelTag || "not recorded", "mono"],
+          ["Quant", model.quant || "not recorded", "mono"],
+          ["Tag", model.tag || "not set", "mono"],
           ["Platform", `${model.platform.name} (${model.platform.id})`],
           ["Engine", `${model.engine || "not recorded"}${model.engineVersion ? ` ${model.engineVersion}` : ""}`, "mono"],
           ["Compute backend", `${model.backend || "not recorded"}${model.backendVersion ? ` ${model.backendVersion}` : ""}`, "mono"],
@@ -693,6 +717,10 @@ function openFromHash() {
 function bindEvents() {
   const inputMap = [
     [elements.search, "search", "input"],
+    [elements.model, "model", "change"],
+    [elements.quant, "quant", "change"],
+    [elements.profile, "profile", "change"],
+    [elements.tag, "tag", "change"],
     [elements.platform, "platform", "change"],
     [elements.engine, "engine", "change"],
     [elements.backend, "backend", "change"],
@@ -708,7 +736,7 @@ function bindEvents() {
   }
 
   document.querySelector("#reset-filters").addEventListener("click", () => {
-    Object.assign(state.filters, { search: "", platform: "", engine: "", backend: "", status: "", difficulty: "", sort: "task" });
+    Object.assign(state.filters, { search: "", model: "", quant: "", profile: "", tag: "", platform: "", engine: "", backend: "", status: "", difficulty: "", sort: "task" });
     for (const [element, key] of inputMap) element.value = state.filters[key];
     render();
   });

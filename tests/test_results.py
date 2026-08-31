@@ -78,12 +78,18 @@ class ResultsTests(unittest.TestCase):
         }
         return {
             "platform": {"id": "strix-halo", "name": "Strix Halo"},
-            "model": {"id": "org/model-q8", "endpoint_metadata": {"n_ctx": 128000}},
+            "model": {
+                "name": "Model",
+                "id": "org/model-q8",
+                "endpoint_metadata": {"n_ctx": 128000},
+            },
             "engine": "llama.cpp",
             "engine_version": None,
             "backend": "rocm",
             "backend_version": "7.14",
-            "model_tag": "q8",
+            "quant": "q8",
+            "inference_profile": "mtp",
+            "tag": "long-context",
             "evaluation_profile": profile,
             "profile_hash": results.evaluation_profile_hash(profile),
         }
@@ -120,7 +126,7 @@ class ResultsTests(unittest.TestCase):
             result = results.read_json(model_dir / "results-task-a.json")
             self.assertTrue(result["completed"])
             self.assertTrue(result["passed"])
-            self.assertEqual(result["model"]["name"], "model-q8")
+            self.assertEqual(result["model"]["name"], "Model")
             self.assertEqual(result["succeeded_at_attempt"], 2)
             self.assertEqual(result["tokens"], {"input": 200, "cached": 160, "output": 40})
             self.assertEqual(len(result["attempts"]), 2)
@@ -249,6 +255,10 @@ class ResultsTests(unittest.TestCase):
             ),
             "Qwen3.6-35B-A3B-UD-Q8_K_XL",
         )
+
+    def test_schema_v2_model_tag_is_read_as_quant(self):
+        self.assertEqual(results.metadata_quant({"model_tag": "UD-Q4_K_XL"}), "UD-Q4_K_XL")
+        self.assertEqual(results.metadata_quant({"quant": "MXFP4"}), "MXFP4")
 
 
 if __name__ == "__main__":

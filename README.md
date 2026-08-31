@@ -112,9 +112,11 @@ and context capacity itself.
 ```bash
 ./terminal_bench.py doctor
 ./terminal_bench.py run --tier full \
-  --platform <platform> --engine <engine> --backend <compute-backend>
+  --platform <platform> --model-name <canonical-model-name> \
+  --engine <engine> --backend <compute-backend>
 ./terminal_bench.py run --tier smoke \
-  --platform <platform> --engine <engine> --backend <compute-backend>
+  --platform <platform> --model-name <canonical-model-name> \
+  --engine <engine> --backend <compute-backend>
 ```
 
 The full 20-task tier is the default. The smoke tier exists only as an explicit
@@ -126,10 +128,11 @@ complete local run might look like:
   --endpoint http://localhost:8080/v1 \
   --platform strix-halo \
   --platform-name "AMD Strix Halo" \
+  --model-name Qwen3.8-27B \
   --engine llama.cpp \
   --backend rocm \
   --backend-version 10.0 \
-  --model-tag UD-Q4_K_XL \
+  --quant UD-Q4_K_XL \
   --inference-profile mtp
 ```
 
@@ -157,20 +160,32 @@ alongside the required platform identifier. Engine and compute-backend identity
 are included in job names, result-directory identity, cache matching, metadata,
 and the results explorer, preventing Vulkan and ROCm attempts from colliding.
 
-The runner discovers the model ID and context capacity from `/models`. Pass
-`--model` if the endpoint advertises more than one model, or `--context-length`
-if it does not advertise its capacity.
+The runner discovers the exact served model ID and context capacity from
+`/models`. Pass `--model` if the endpoint advertises more than one model. Every
+run also requires `--model-name`: a stable human-readable family/revision such
+as `DeepSeek-V4-Flash-0731` or `Qwen3.8-27B`. It must stay the same across
+quants and inference profiles and must not include a GGUF extension, shard
+number, quant, profile, or experimental tag. Pass `--context-length` only when
+an explicit user-requested override is required.
 
 Authentication is not normally needed for a local endpoint, so omit
 `--api-key` by default. If querying `/models` returns `401` or `403`, the
 endpoint requires authentication; set `TBENCH_API_KEY` or pass `--api-key` for
 that endpoint.
 
-When an endpoint exposes the same model ID for different quantizations or
-variants, pass the exact variant name with `--model-tag`. The full tag is
-recorded in result metadata and is included in both the Harbor job-directory
-name and the exported result-directory identity. Automatic attempt job names
-retain the same tag.
+Record variant identity in three separate fields:
+
+- `--quant` is only the numeric format or quantization, such as `UD-IQ3_XXS`,
+  `Q4_0_ROCMI4`, or `IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8`;
+- `--inference-profile` is only the serving profile, such as `mtp16` or
+  `DSpark`; and
+- `--tag` is an optional remaining label, such as `chat-v2-imatrix-0731`.
+
+Do not combine these fields or pass a complete model filename as any of them.
+They are stored separately, included in run identity, and exposed as separate
+results-explorer filters. Legacy exported metadata containing `model_tag` is
+read as quantization during migration, but new commands and exports do not use
+that field.
 
 Runs are sequential and allow up to two attempts per task. Attempt two runs
 only when attempt one fails. Terminus-2 summarizes context when it approaches

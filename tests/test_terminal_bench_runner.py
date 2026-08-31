@@ -13,6 +13,8 @@ class TerminalBenchRunnerTests(unittest.TestCase):
                 "run",
                 "--platform",
                 "test-local",
+                "--model-name",
+                "Test-Model",
                 "--engine",
                 "llama.cpp",
                 "--backend",
@@ -25,17 +27,57 @@ class TerminalBenchRunnerTests(unittest.TestCase):
     def test_run_requires_platform_engine_and_backend(self):
         with self.assertRaises(SystemExit):
             terminal_bench.parse_args(
-                ["run", "--engine", "llama.cpp", "--backend", "vulkan"]
+                [
+                    "run",
+                    "--model-name",
+                    "Test-Model",
+                    "--engine",
+                    "llama.cpp",
+                    "--backend",
+                    "vulkan",
+                ]
             )
         with self.assertRaises(SystemExit):
-            terminal_bench.parse_args(["run", "--platform", "test-local"])
-        with self.assertRaises(SystemExit):
             terminal_bench.parse_args(
-                ["run", "--platform", "test-local", "--backend", "vulkan"]
+                ["run", "--platform", "test-local", "--model-name", "Test-Model"]
             )
         with self.assertRaises(SystemExit):
             terminal_bench.parse_args(
-                ["run", "--platform", "test-local", "--engine", "llama.cpp"]
+                [
+                    "run",
+                    "--platform",
+                    "test-local",
+                    "--model-name",
+                    "Test-Model",
+                    "--backend",
+                    "vulkan",
+                ]
+            )
+        with self.assertRaises(SystemExit):
+            terminal_bench.parse_args(
+                [
+                    "run",
+                    "--platform",
+                    "test-local",
+                    "--model-name",
+                    "Test-Model",
+                    "--engine",
+                    "llama.cpp",
+                ]
+            )
+
+    def test_run_requires_canonical_model_name(self):
+        with self.assertRaises(SystemExit):
+            terminal_bench.parse_args(
+                [
+                    "run",
+                    "--platform",
+                    "test-local",
+                    "--engine",
+                    "llama.cpp",
+                    "--backend",
+                    "vulkan",
+                ]
             )
 
     def test_tiers_are_nested_and_tasks_exist(self):
@@ -90,8 +132,40 @@ class TerminalBenchRunnerTests(unittest.TestCase):
 
     def test_agent_has_separate_result_namespace(self):
         self.assertEqual(
-            terminal_bench.result_tag("mtp", "llama.cpp", "vulkan"),
-            "llama.cpp-vulkan-mtp-terminus-2",
+            terminal_bench.result_tag(
+                "UD-Q4_K_XL", "llama.cpp", "vulkan", "mtp", "long-context"
+            ),
+            "llama.cpp-vulkan-UD-Q4_K_XL-mtp-long-context-terminus-2",
+        )
+
+    def test_run_identity_keeps_quant_profile_and_tag_separate(self):
+        args = terminal_bench.parse_args(
+            [
+                "run",
+                "--platform",
+                "test-local",
+                "--model-name",
+                "DeepSeek-V4-Flash-0731",
+                "--engine",
+                "DwarfStar",
+                "--backend",
+                "rocm",
+                "--quant",
+                "IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8",
+                "--inference-profile",
+                "DSpark",
+                "--tag",
+                "chat-v2-imatrix-0731",
+            ]
+        )
+        self.assertEqual(
+            terminal_bench.run_identity_args(args),
+            (
+                "DeepSeek-V4-Flash-0731",
+                "IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8",
+                "DSpark",
+                "chat-v2-imatrix-0731",
+            ),
         )
 
     def test_compute_backends_have_distinct_result_directories(self):
@@ -108,19 +182,20 @@ class TerminalBenchRunnerTests(unittest.TestCase):
         self.assertIn("llama.cpp-vulkan", vulkan_dir.name)
         self.assertIn("llama.cpp-rocm", rocm_dir.name)
 
-    def test_model_tag_is_preserved_in_default_job_and_retry_names(self):
-        model_tag = (
-            "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-"
-            "chat-v2-imatrix-0731"
-        )
+    def test_quant_profile_and_tag_are_preserved_in_job_names(self):
+        quant = "IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8"
         job_name = terminal_bench.make_job_name(
             "full",
             "deepseek-v4-flash",
-            model_tag,
+            quant,
             engine="llama.cpp",
             backend="vulkan",
+            inference_profile="DSpark",
+            tag="chat-v2-imatrix-0731",
         )
-        self.assertIn(model_tag, job_name)
+        self.assertIn(quant, job_name)
+        self.assertIn("DSpark", job_name)
+        self.assertIn("chat-v2-imatrix-0731", job_name)
         self.assertIn("llama.cpp--vulkan", job_name)
         self.assertEqual(
             terminal_bench.attempt_job_name(job_name, 2), f"{job_name}-attempt2"
@@ -136,7 +211,9 @@ class TerminalBenchRunnerTests(unittest.TestCase):
             engine_version="b1234",
             backend="vulkan",
             backend_version="1.4.304",
+            quant="UD-Q4_K_XL",
             inference_profile=None,
+            tag=None,
             context_length=262144,
             agent_timeout_seconds=10800,
         )
@@ -154,6 +231,8 @@ class TerminalBenchRunnerTests(unittest.TestCase):
                 "run",
                 "--platform",
                 "test-local",
+                "--model-name",
+                "Test-Model",
                 "--engine",
                 "llama.cpp",
                 "--backend",

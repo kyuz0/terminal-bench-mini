@@ -25,6 +25,11 @@ The builder reads:
 - task descriptions, metadata, and evaluated instructions from `tasks/`;
 - short verifier failure evidence from ignored local `jobs/`, when available.
 
+Each run exposes a canonical model display name plus separate `quant`,
+`inferenceProfile`, and optional `tag` fields. The explorer provides independent
+model, quant, profile, and tag filters; the endpoint model ID remains available
+in run details for exact reproducibility.
+
 Verifier excerpts are copied into `data.json`; complete `jobs/` directories do
 not need to be published. Public evidence links point to normalized result JSON,
 run metadata, task definitions, and copied transcripts in the GitHub repository.
