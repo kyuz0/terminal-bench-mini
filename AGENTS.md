@@ -2,11 +2,10 @@
 
 ## Scope
 
-This repository is **Terminal-Bench-Mini-20**: a small, self-contained
-Terminal-Bench 2.1 derivative for comparing locally served model variants and
-quantizations. It tests medium- to long-horizon agentic workflows in which a
-model uses terminal tools, writes and debugs code, configures systems, and
-completes multi-step tasks.
+This repository is **Terminal-Bench-Local**: a small, self-contained benchmark
+for comparing locally served model variants and quantizations. Its default is
+the current timeout-pruned core-19; the original Terminal-Bench 2.1 mini-20 is
+available only for explicit reproduction through a versioned suite manifest.
 
 ## User communication
 
@@ -21,14 +20,31 @@ Keep every user-facing response direct and brief.
 
 ## Benchmark invariants
 
-- `subsets/full.txt` is the canonical 20-task set; `subsets/smoke.txt` is the
-  quick validation set.
+- `suites/core19.json` is the default timeout-pruned benchmark;
+  `suites/legacy-mini20.json` preserves the original mini-20. The manifest and
+  tier together define the score denominator.
+- `subsets/full.txt` mirrors the 19-task Core-19 full tier;
+  `subsets/smoke.txt` is the quick validation set.
 - `tasks/` contains vendored upstream task definitions at the revision recorded
   in `tasks/REVISION`. Editing a task changes the benchmark.
+- Suite manifests record per-task provenance and complete-tree digests. Do not
+  change a vendored task without updating its manifest identity and provenance.
 - Runs use Harbor 0.20.0 with Terminus-2 2.0.0 against one OpenAI-compatible
   local endpoint.
 - Run one task at a time by default. Local inference servers should not receive
   concurrent benchmark requests unless the user explicitly opts in.
+- Passing multiple URLs with `--endpoints` explicitly opts into one concurrent
+  task per endpoint by default. The runner validates matching model metadata
+  and distributes tasks across independent Harbor child jobs.
+- Core-19 distributed runs use deterministic longest-processing-time assignment
+  from the checked-in historical mean-duration weights. Unknown suites fall
+  back to round-robin assignment. Scheduling changes execution order only, not
+  benchmark identity, scoring, or task content.
+- Endpoint count, hostnames, ports, and concurrency never determine the
+  hardware platform identity. Two endpoints on one host do not imply a
+  `dual-*` platform. Never copy a platform from an older result or infer one
+  from the endpoint topology; use the platform explicitly supplied for the
+  current run, or ask the user for it before constructing the command.
 - The default is up to two attempts per task, with the second attempt run only
   when the first fails.
 - Each attempt has a three-hour agent timeout. Do not add arbitrary model-call,
@@ -49,8 +65,11 @@ Keep every user-facing response direct and brief.
 - `results.py` — normalized result export, attempt merging, and aggregate index.
 - `compat/podman/docker` — Docker-compatible shim used when Harbor runs through
   Podman.
-- `subsets/` — benchmark task lists.
-- `tasks/` — vendored benchmark fixtures; do not casually modify them.
+- `suite_manifest.py` and `suites/` — versioned suite identity, tiers, task
+  provenance, and content digests.
+- `subsets/` — simple Core-19 full and smoke task lists retained for
+  compatibility.
+- `tasks/` — vendored fixtures; do not casually modify them.
 - `results/` — checked-in Qwen baseline and transcripts.
 - `jobs/` and `.runner/` — ignored runtime state and generated configuration.
 
@@ -58,9 +77,8 @@ Do not hand-edit scores or transcripts in `results/`. Export them through the
 runner so attempt history and model identity remain consistent. Do not expose
 task `solution/` content to an evaluated agent.
 
-If the task set changes, update `subsets/full.txt`, the task summary and score
-denominator in `README.md`, and any tests that assert the set size. Preserve the
-upstream license and provenance in `NOTICE.md`.
+If a suite changes, update its manifest, task digests, README description, and
+tests. Preserve upstream license and provenance in `NOTICE.md`.
 
 Keep exploratory notes out of `README.md`. Update user documentation only when
 the repository's actual behavior, task set, or methodology changes.
@@ -104,14 +122,18 @@ resolved configuration and command together for confirmation.
 
 Collect or confirm:
 
-- the scope: the full 20-task tier is the default. Use the one-task smoke tier
-  only when the user explicitly asks for a quick validation, or select one
-  explicit task when requested;
+- the suite and scope: `core19` full is the default current benchmark. Use
+  `legacy-mini20` only to reproduce the original mini-20, or choose a smoke
+  tier or one explicit task when requested;
 - the host-visible OpenAI-compatible endpoint, for example
   `http://localhost:8080/v1`;
+- or equivalent host-visible endpoints supplied with `--endpoints` when the
+  user explicitly wants a distributed run;
 - the hardware platform identifier, such as `strix-halo`, `gb10`, or `r9700`,
   plus an optional human-readable name. The platform is the hardware identity,
-  never `localhost`, an IP address, or a port;
+  never `localhost`, an IP address, a port, the number of endpoints, or a value
+  inferred from prior results. If the user has not stated it for the current
+  run, ask instead of guessing;
 - the inference engine, such as `llama.cpp`, `DwarfStar`, or `vLLM`, and its
   version or commit when known;
 - the compute backend, such as `rocm-10.0`, `vulkan`, `cuda`, `metal`, or `cpu`, and
@@ -146,10 +168,9 @@ user to configure `TBENCH_API_KEY` or provide `--api-key`. Do not echo or repeat
 a secret supplied through the environment.
 
 Once the endpoint details are resolved, run `./terminal_bench.py doctor` with
-the applicable `--endpoint` and `--model` arguments. This validates the
-endpoint, model metadata, container runtime, Harbor availability, and vendored
-tasks without running inference. Resolve any failed prerequisite before
-proposing a real run.
+the applicable `--suite`, tier/task, `--endpoint`, and `--model` arguments. This
+validates the exact Harbor version, suite digests, selected tasks, endpoint,
+model metadata, and container runtime without running inference.
 
 Unless the user explicitly overrides them, preserve the benchmark defaults:
 
@@ -163,12 +184,14 @@ when the user explicitly chooses a non-default timeout.
 
 Before execution, show the user:
 
-1. a compact summary of the tier and task count, endpoint, exact model ID,
+1. a compact summary of the suite, tier and task count, endpoint, exact model ID,
    context length, canonical model name, hardware platform, engine and version,
    backend and version, quantization, inference profile, optional tag, attempts,
    concurrency, timeout, and conditional-retry behavior;
-2. the complete copy-pasteable `./terminal_bench.py run ...` command, with the
-   tier and identity fields explicit; and
+2. the complete copy-pasteable `./terminal_bench.py run ...` command. Keep it
+   minimal: omit `--suite core19` because Core-19 is already the default, unless
+   the user explicitly asks for the suite flag or a non-default suite. Keep
+   required identity fields explicit; and
 3. a reminder that a full run can take many hours and that settings can still
    be corrected or clarified.
 
@@ -202,7 +225,7 @@ Interpret Harbor output carefully:
   model request. It is not automatically a failed task or stopped benchmark;
   if later progress appears, the overall run continued. Use the task result and
   exception artifacts before classifying the outcome;
-- `1:35:27 build-pov-ray... running agent` is the elapsed time for the current
+- `1:35:27 mailman... running agent` is the elapsed time for the current
   task. Sparse output during a long task is not proof that it is stuck; and
 - `-:--:--` means Harbor has no usable ETA.
 
@@ -222,11 +245,94 @@ finished merely because attempt one ended: with the default policy, Harbor may
 move into a separate `-attempt2` job for failed tasks. Treat the run as complete
 only after the configured attempt policy has finished and the normalized result
 set has been exported.
-on ocm 10.0
+
+On Ctrl+C, the wrapper cleans matching task containers and discards trial
+directories whose result has the exact exception type `CancelledError`. Harbor
+writes that artifact for the agent interrupted by the signal; it is not a model
+failure and must restart from scratch on resume without consuming an attempt.
+Do not discard genuine verifier failures, endpoint errors, or agent timeouts.
+
+### Resuming with additional endpoints
+
+When the user wants to interrupt a single-endpoint run and continue it with
+more equivalent endpoints:
+
+- Do not create a new `run` command and do not use `retry-failed`. Resolve the
+  exact original `jobs/<job-name>` directory.
+- Tell the user to press Ctrl+C and wait for the runner's cleanup and exit. The
+  topology-changing resume must never run while that job's Harbor process is
+  alive; the runner rejects this condition.
+- Validate every new endpoint against the stored exact model ID, stable model
+  metadata, and advertised context. Endpoint URLs are execution metadata only:
+  never change or re-infer the model, platform, engine, backend, quantization,
+  inference profile, suite, or evaluation profile during this operation.
+- Use the original endpoint plus every added endpoint in one command, or use
+  `--endpoint` to replace the original single endpoint:
+
+  ```bash
+  ./terminal_bench.py resume jobs/<job-name> \
+    --endpoints <original-endpoint>,<additional-endpoint>
+
+  ./terminal_bench.py resume jobs/<job-name> \
+    --endpoint <replacement-endpoint>
+  ```
+
+- Completed trial directories with a final `result.json` are exported and
+  preserved, whether they passed or genuinely failed. Harbor may write a
+  final-looking `CancelledError` result for the agent active during Ctrl+C; the
+  runner discards that trial directory because it is an interruption, not a
+  benchmark attempt. A trial without `result.json` is likewise unfinished.
+  Both restart from scratch on the same attempt number and do not consume an
+  attempt. Remaining tasks are distributed with the normal weighted scheduler,
+  after which normal conditional retries continue.
+- A resumed dashboard's overall row must retain the original requested-task
+  denominator and include preserved completed/pass/error counts. Do not report
+  only the redistributed subset as the overall campaign. Per-endpoint rows stay
+  scoped to each endpoint's new shard.
+- Preserve the stored per-endpoint concurrency unless the user explicitly asks
+  for `--concurrency`. Preserve the stored API key unless the replacement
+  endpoints require a supplied `--api-key` or `TBENCH_API_KEY`. Never echo the
+  key.
+- Endpoint redistribution is supported only when converting an interrupted
+  original single job. Do not attempt to repartition an existing distributed
+  orchestrator; resume its parent with its recorded topology.
+- Keep all original job artifacts. Starting this resume launches inference, so
+  an agent must still have the user's explicit permission before executing it.
+
+### Interactive job selection
+
+When the user wants to find, identify, resume, or rerun an earlier campaign,
+prefer the repository job browser instead of asking them to copy a long job ID:
+
+```bash
+./terminal_bench.py jobs
+```
+
+The browser lists top-level campaigns newest-first and folds endpoint shards
+and conditional-attempt jobs into their parent. It shows timestamps, status,
+unique task progress and passes, suite/tier, readable model identity,
+quantization, inference profile, platform, engine/backend, endpoints, and the
+raw job name. It is interactive only on a TTY; use `--list-only`, `--limit N`,
+or `--all` for a read-only inventory.
+
+- Incomplete stopped campaigns offer resume or a fresh rerun. Completed
+  campaigns offer only a fresh rerun. Live campaigns are view-only.
+- Before resume, the browser displays the stored endpoints and asks whether to
+  change them. An original single-endpoint job can move to one replacement
+  endpoint or expand to multiple matching endpoints. Existing distributed
+  orchestrators cannot be repartitioned.
+- A fresh rerun reconstructs the stored suite/tier, model, context, platform,
+  engine/backend, quant, profile, attempt budget, timeout, concurrency, and
+  container policy. Never infer or silently alter those identity fields.
+- Resume and rerun each require final confirmation because they launch
+  inference. Listing or selecting a job does not authorize execution.
+- Do not show retry children or endpoint shards as independent campaigns when
+  their `attempt_group` parent is available.
+
 ## Results and visualization
 
 A completed run or resumed Harbor job automatically exports normalized results
-under `results/<platform>/<model>_results/`, writes that result set's
+under a suite-hash namespace below `results/suites/`, writes that result set's
 `summary.json`, and rebuilds `results/index.json`. Do not hand-edit any of these
 artifacts. `./terminal_bench.py results` is available to rebuild the aggregate
 index from already exported result sets; it is not normally needed after a
@@ -251,10 +357,10 @@ root:
 
 ```bash
 python3 docs/build_data.py
-python3 -m http.server 8000
+python3 -m http.server --bind 127.0.0.1 --directory docs 8000
 ```
 
-Tell the user to open `http://localhost:8000/docs/`. The viewer is static and
+Tell the user to open `http://127.0.0.1:8000/`. The viewer is static and
 has no Node.js or npm dependency. Re-run `python3 docs/build_data.py` after each
 new result export; an already-running HTTP server will serve the regenerated
 dataset. If port 8000 is occupied, select another port and report the matching
@@ -268,6 +374,7 @@ Run commands from this repository's root:
 python3 -m py_compile terminal_bench.py results.py compat/podman/docker
 python3 -m unittest discover -s tests -v
 ./terminal_bench.py list
+./terminal_bench.py jobs --list-only
 ./terminal_bench.py results
 ```
 
@@ -292,13 +399,20 @@ suite can consume many hours of local inference.
 ## Common operations
 
 ```bash
-# Run the full 20-task set
+# Run the retained core
 ./terminal_bench.py run --tier full \
   --platform <platform> --model-name <canonical-model-name> \
   --engine <engine> --backend <compute-backend> [model options]
 
 # Continue an interrupted Harbor job
 ./terminal_bench.py resume jobs/<job-name>
+
+# Continue an interrupted single-endpoint job on additional equivalent endpoints
+./terminal_bench.py resume jobs/<job-name> \
+  --endpoints <original-endpoint>,<additional-endpoint>
+
+# Browse, identify, resume, or rerun campaigns
+./terminal_bench.py jobs
 
 # Give failed tasks their next conditional attempt
 ./terminal_bench.py retry-failed results/<platform>/<model>_results

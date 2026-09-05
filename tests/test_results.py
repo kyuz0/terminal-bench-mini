@@ -7,6 +7,43 @@ import results
 
 
 class ResultsTests(unittest.TestCase):
+    def test_empty_index_rebuild_does_not_create_a_suite_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            results.rebuild_all_indexes(root)
+            self.assertFalse((root / "suites").exists())
+
+    def test_hosted_task_name_wins_over_generic_materialized_path(self):
+        self.assertEqual(
+            results.task_id_from_trial(
+                {
+                    "task_name": "terminal-bench/fin-saccr-rwa",
+                    "task_id": {"path": "/cache/datasets/5b2103ac/task"},
+                    "trial_name": "fin-saccr-rwa__abc123",
+                }
+            ),
+            "fin-saccr-rwa",
+        )
+
+    def test_task_id_falls_back_to_parent_of_generic_task_path(self):
+        self.assertEqual(
+            results.task_id_from_trial(
+                {"task_id": {"path": "/datasets/mvcc-lsm-compaction/task"}}
+            ),
+            "mvcc-lsm-compaction",
+        )
+
+    def test_conflicting_suite_identity_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            results.metadata_suite(
+                {
+                    "suite": {"id": "one", "manifest_hash": "a" * 64},
+                    "evaluation_profile": {
+                        "suite": {"id": "two", "manifest_hash": "b" * 64}
+                    },
+                }
+            )
+
     def test_terminal_harness_uses_harbor_path_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -26,7 +63,40 @@ class ResultsTests(unittest.TestCase):
             self.assertIn("harbor_job", result)
             self.assertIn("harbor_jobs", result)
             self.assertIn("harbor_paths", result["attempts"][0])
+            self.assertIsNone(result["attempts"][0]["endpoint"])
             self.assertNotIn("pier_job", result)
+
+    def test_export_reuses_existing_descriptive_platform_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = root / "jobs" / "job"
+            job.mkdir(parents=True)
+            (job / "result.json").write_text("{}")
+            self.make_trial(job, "task__one", task="task", reward=1)
+            results_root = root / "export"
+            results.write_json(
+                results_root / "strix-halo" / "platform.json",
+                {"id": "strix-halo", "name": "AMD Strix Halo"},
+            )
+            meta = self.run_meta()
+            meta["platform"] = {"id": "strix-halo", "name": "strix-halo"}
+
+            model_dir, _ = results.export_job(
+                job,
+                results_root=results_root,
+                repo_root=root,
+                run_meta=meta,
+            )
+
+            exported = results.read_json(model_dir / "results-task.json")
+            self.assertEqual(
+                exported["platform"],
+                {"id": "strix-halo", "name": "AMD Strix Halo"},
+            )
+            self.assertEqual(
+                results.read_json(model_dir / "run-meta.json")["platform"],
+                {"id": "strix-halo", "name": "AMD Strix Halo"},
+            )
 
     def make_trial(
         self,
@@ -142,6 +212,120 @@ class ResultsTests(unittest.TestCase):
             self.assertEqual(len(index["models"]), 1)
             self.assertEqual(index["tasks"][0]["id"], "task-a")
 
+    def test_manifest_suite_exports_to_isolated_namespace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = root / "jobs" / "job-suite"
+            job.mkdir(parents=True)
+            (job / "result.json").write_text("{}")
+            self.make_trial(job, "task-a__one", reward=1)
+            meta = self.run_meta()
+            suite = {
+                "schema_version": 1,
+                "id": "test-suite",
+                "version": "1.0.0",
+                "manifest_hash": "a" * 64,
+            }
+            provenance = {
+                "id": "task-a",
+                "source": "test-source",
+                "upstream_name": "terminal-bench/task-a",
+                "content_sha256": "sha256:" + "b" * 64,
+            }
+            meta["suite"] = suite
+            meta["task_provenance"] = {"task-a": provenance}
+            meta["evaluation_profile"] = {
+                **meta["evaluation_profile"],
+                "suite": suite,
+            }
+            meta["profile_hash"] = results.evaluation_profile_hash(
+                meta["evaluation_profile"]
+            )
+            results_root = root / "benchmark_results"
+
+            model_dir, summary = results.export_job(
+                job,
+                results_root=results_root,
+                repo_root=root,
+                run_meta=meta,
+            )
+
+            scope = results_root / "suites" / ("test-suite-" + "a" * 64)
+            self.assertTrue(model_dir.is_relative_to(scope))
+            self.assertEqual(
+                results.results_root_from_model_dir(model_dir, meta), results_root
+            )
+            self.assertFalse((results_root / "strix-halo").exists())
+            self.assertEqual(results.read_json(scope / "suite.json"), suite)
+            self.assertEqual(results.read_json(scope / "index.json")["suite"], suite)
+            catalog = results.read_json(results_root / "suites" / "index.json")
+            self.assertEqual(catalog["suites"][0]["id"], "test-suite")
+            rebuilt = results.rebuild_all_indexes(results_root)
+            self.assertEqual(rebuilt["legacy"]["models"], [])
+            self.assertEqual(len(rebuilt["suite_catalog"]["suites"]), 1)
+            result = results.read_json(model_dir / "results-task-a.json")
+            self.assertEqual(result["suite"], suite)
+            self.assertEqual(result["task_provenance"], provenance)
+            self.assertEqual(summary["suite"], suite)
+
+    def test_suite_result_paths_isolate_structurally_colliding_tags(self):
+        suite = {"id": "suite", "manifest_hash": "a" * 64}
+        first_profile = results.evaluation_profile_hash(
+            {"quant": "Q4", "inference_profile": "mtp-long"}
+        )
+        second_profile = results.evaluation_profile_hash(
+            {"quant": "Q4-mtp", "inference_profile": "long"}
+        )
+        # The legacy display tag is identical; structured profile identity is not.
+        display_tag = "engine-backend-Q4-mtp-long-agent"
+        first = results.model_results_dir(
+            Path("results"),
+            "local",
+            "model",
+            display_tag,
+            suite=suite,
+            profile_hash=first_profile,
+        )
+        second = results.model_results_dir(
+            Path("results"),
+            "local",
+            "model",
+            display_tag,
+            suite=suite,
+            profile_hash=second_profile,
+        )
+        self.assertNotEqual(first, second)
+
+    def test_manifest_suite_export_requires_task_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job = root / "jobs" / "job-suite"
+            job.mkdir(parents=True)
+            (job / "result.json").write_text("{}")
+            self.make_trial(job, "task-a__one", reward=1)
+            meta = self.run_meta()
+            suite = {
+                "schema_version": 1,
+                "id": "test-suite",
+                "version": "1.0.0",
+                "manifest_hash": "a" * 64,
+            }
+            meta["suite"] = suite
+            meta["evaluation_profile"] = {
+                **meta["evaluation_profile"],
+                "suite": suite,
+            }
+            meta["profile_hash"] = results.evaluation_profile_hash(
+                meta["evaluation_profile"]
+            )
+            with self.assertRaisesRegex(ValueError, "no valid provenance"):
+                results.export_job(
+                    job,
+                    results_root=root / "benchmark_results",
+                    repo_root=root,
+                    run_meta=meta,
+                )
+
     def test_conditional_attempt_export_merges_separate_harbor_jobs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -247,6 +431,39 @@ class ResultsTests(unittest.TestCase):
         path = results.model_results_dir(Path("benchmark_results"), "local", model_id, None)
         self.assertIn("Very-Long-Model", path.name)
         self.assertIn("UD-Q8_K_XL", path.name)
+
+    def test_long_identity_tags_with_same_prefix_have_distinct_directories(self):
+        prefix = "llama.cpp-rocm-" + "very-long-quant-" * 4
+        first = results.model_results_dir(
+            Path("benchmark_results"), "local", "model", prefix + "mtp"
+        )
+        second = results.model_results_dir(
+            Path("benchmark_results"), "local", "model", prefix + "no-mtp"
+        )
+        self.assertNotEqual(first, second)
+        self.assertIn("mtp", first.name)
+        self.assertIn("no-mtp", second.name)
+        self.assertEqual(len(results.identity_tag_component(prefix + "mtp")), 48)
+
+    def test_long_platform_ids_with_same_prefix_have_distinct_directories(self):
+        prefix = "lab-cluster-with-a-very-long-shared-platform-prefix-"
+        first = results.model_results_dir(
+            Path("benchmark_results"), prefix + "one", "model", None
+        )
+        second = results.model_results_dir(
+            Path("benchmark_results"), prefix + "two", "model", None
+        )
+        self.assertNotEqual(first.parent, second.parent)
+        self.assertLessEqual(len(first.parent.name), 48)
+
+    def test_lossy_short_identity_tag_sanitization_cannot_collide(self):
+        first = results.model_results_dir(
+            Path("benchmark_results"), "local", "model", "quant/a"
+        )
+        second = results.model_results_dir(
+            Path("benchmark_results"), "local", "model", "quant a"
+        )
+        self.assertNotEqual(first, second)
 
     def test_model_name_preserves_case_quantization_and_drops_gguf_extension(self):
         self.assertEqual(

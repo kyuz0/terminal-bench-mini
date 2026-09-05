@@ -1,20 +1,24 @@
-# Terminal-Bench-Mini-20
+# Terminal-Bench-Local
 
-**Terminal-Bench-Mini-20** is a 20-task, computing-focused subset of
-Terminal-Bench 2.1 for evaluating local models and quantizations. It checks
-whether a model can remain coherent, use a terminal, write and debug code,
-configure services, and finish multi-step work.
+**Terminal-Bench-Local** provides versioned, computing-focused suites for
+evaluating local models and quantizations. **Core-19 is the current benchmark
+for new comparisons**. The superseded 20-task suite remains available only for
+explicit reproduction of older runs.
 
-## Task mix
+## Core-19 task mix
 
-The subset has 7 software-engineering tasks, 4 system-administration tasks,
-and 9 tasks spanning debugging, security, data/querying, ML scheduling, and
-file operations. Upstream metadata labels 3 easy, 13 medium, and 4 hard.
+Core-19 has 6 software-engineering tasks, 4 system-administration tasks, and 9
+tasks spanning debugging, security, data/querying, and file operations.
+Upstream metadata labels 3 easy, 13 medium, and 3 hard.
 
-Selection used published results from six strong model configurations. Ten
-tasks had high pass rates (87–100%) and ten had medium pass rates (53–78%).
-Rarely solved floor tasks and non-computing work such as protein modelling were
-excluded. A few longer tasks remain to test sustained work and context handling.
+It removes only `build-pov-ray`, the clear serial timeout offender in the
+finished data: 3/9 models passed it within two attempts, 8/16 attempts ended in
+agent timeout, and its median model runtime was about 4.9 hours. Summed
+historical per-task medians fall from roughly 14.8 hours to 9.9 hours (about
+33%) while preserving short, medium, and long workflows. The two previously
+considered removals, `break-filter-js-from-html` and
+`llm-inference-batching-scheduler`, remain because 7/9 models passed each at
+pass@2 and they preserve useful model-quality signal.
 
 | Task | Area | Purpose |
 | --- | --- | --- |
@@ -34,14 +38,13 @@ excluded. A few longer tasks remain to test sustained work and context handling.
 | `configure-git-webserver` | system administration | Deploy Git pushes automatically through Nginx. |
 | `build-cython-ext` | debugging | Repair and compile Cython extensions against NumPy 2.x. |
 | `extract-elf` | file operations | Parse an ELF binary and export memory values. |
-| `build-pov-ray` | software engineering | Port and compile legacy POV-Ray source. |
 | `openssl-selfsigned-cert` | security | Generate and validate a correctly configured TLS certificate. |
 | `overfull-hbox` | debugging | Repair LaTeX layout under constrained edits. |
 | `mteb-retrieve` | data science | Perform deterministic embedding-based retrieval. |
 
-`mailman`, `fix-ocaml-gc`, `llm-inference-batching-scheduler`,
-`build-cython-ext`, and `build-pov-ray` provide the longer-horizon portion of
-the suite. The remaining tasks keep the benchmark practical on local hardware.
+`mailman`, `fix-ocaml-gc`, `llm-inference-batching-scheduler`, and
+`build-cython-ext` provide the sustained-work
+portion of the suite without letting chronic timeouts dominate total runtime.
 
 ## Requirements
 
@@ -60,15 +63,52 @@ many hours. It keeps the benchmark attached to a persistent terminal if the
 user disconnects and lets a local coding agent inspect the same live output.
 
 With `uv` or `uvx`, Harbor does not need to be installed manually. The runner
-resolves the pinned `harbor==0.20.0` package when it is first needed. The first
-real run also pulls the task container images, so allow outbound network access
+resolves the pinned `harbor==0.20.0` package when it is first needed and verifies
+the CLI's exact version before a run. The first real run also pulls the task
+container images, so allow outbound network access
 and enough free disk space for Python packages and container images.
 
 The OpenAI-compatible inference server must already be running and reachable
 from this host. The repository does not install the model, inference engine,
 GPU drivers, ROCm, CUDA, or Vulkan; those belong to the user's inference-server
-setup. The 20 task definitions are already vendored in `tasks/`, so no separate
+setup. All built-in-suite task definitions are vendored locally, so no separate
 Terminal-Bench checkout or project-specific Python environment is required.
+
+## Suites and provenance
+
+Runs select a versioned suite manifest with `--suite`. Two built-in manifests
+are available:
+
+- `core19` — the current timeout-pruned benchmark, retaining 19 tasks and
+  removing only `build-pov-ray`;
+- `legacy-mini20` — the superseded 20-task suite, retained only for explicit
+  reproduction of older runs.
+
+Suite manifests live under `suites/`. They record the exact upstream source,
+revision, task content digest, tiers, and task root. The runner verifies every
+digest before a run and stores the suite identity and per-task provenance with
+the results. Results from different suite manifests are placed in separate
+namespaces and are never merged by task filename alone.
+
+`tasks/` contains the vendored Terminal-Bench 2.1 tasks. In `legacy-mini20`
+1.0.1 and `core19` 1.0.0, `configure-git-webserver` has a verifier-only
+hardening patch so invalid SSH setups fail promptly; its instruction and
+environment are unchanged. Existing completed runs keep their original attempt
+and reward data and are normalized to the Core-19 task denominator.
+Use a built-in ID or a manifest path:
+
+```bash
+./terminal_bench.py list --suite core19
+./terminal_bench.py doctor --suite core19 --tier smoke \
+  --endpoint http://localhost:8080/v1
+./terminal_bench.py run --suite core19 --tier full \
+  --platform <platform> --model-name <canonical-model-name> \
+  --engine <engine> --backend <compute-backend>
+```
+
+Core-19 is the no-argument default for current runs. Select `legacy-mini20`
+explicitly—or use the old `--tasks-dir tasks` spelling—only for historical
+reproducibility.
 
 Check a fresh host with:
 
@@ -110,21 +150,19 @@ and context capacity itself.
 ### Commands
 
 ```bash
-./terminal_bench.py doctor
-./terminal_bench.py run --tier full \
-  --platform <platform> --model-name <canonical-model-name> \
-  --engine <engine> --backend <compute-backend>
-./terminal_bench.py run --tier smoke \
+./terminal_bench.py doctor --suite core19
+./terminal_bench.py run --suite core19 --tier full \
   --platform <platform> --model-name <canonical-model-name> \
   --engine <engine> --backend <compute-backend>
 ```
 
-The full 20-task tier is the default. The smoke tier exists only as an explicit
-quick validation. The default endpoint is `http://localhost:8080/v1`. A
-complete local run might look like:
+Core-19 is the default for new runs. Select `legacy-mini20` explicitly only to
+reproduce a historical 20-task result. Every suite may define its own full and
+smoke tiers. The default endpoint is `http://localhost:8080/v1`. A complete
+Core-19 run might look like:
 
 ```bash
-./terminal_bench.py run --tier full \
+./terminal_bench.py run --suite core19 --tier full \
   --endpoint http://localhost:8080/v1 \
   --platform strix-halo \
   --platform-name "AMD Strix Halo" \
@@ -134,6 +172,108 @@ complete local run might look like:
   --backend-version 10.0 \
   --quant UD-Q4_K_XL \
   --inference-profile mtp
+```
+
+To distribute a run across equivalent inference hosts, pass two or more URLs
+with `--endpoints`:
+
+```bash
+./terminal_bench.py run --suite core19 --tier full \
+  --endpoints http://host-a:8000/v1,http://host-b:8000/v1,http://host-c:8000/v1 \
+  --model deepseek-v4-flash \
+  --platform strix-halo \
+  --model-name DeepSeek-V4-Vision_Exp \
+  --engine DwarfStar \
+  --backend rocm \
+  --backend-version 10.0 \
+  --quant IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8
+```
+
+Comma-separated and space-separated endpoint lists are both accepted.
+`--endpoint` and `--endpoints` are mutually exclusive. Before launching work,
+the runner checks that every URL advertises the same exact model ID, context
+capacity, and stable model metadata. Hardware, engine, and backend identity
+still come from the explicit run arguments because an OpenAI-compatible
+endpoint cannot reliably report them.
+
+Core-19 tasks are assigned with deterministic longest-processing-time
+scheduling using historical mean attempt durations, including long-tail and
+timeout cost. This balances estimated wall time across endpoints and places
+expensive tasks first; suites without duration estimates fall back to
+round-robin assignment. The runner starts one Harbor child job per non-empty
+shard, so the default `--concurrency 1` means one task at a time on each
+endpoint; a larger value applies per endpoint. Conditional retries use the same
+scheduler, and normalized results record the endpoint used by each attempt. To
+prevent concurrent Harbor progress renderers from corrupting the terminal,
+each child writes to `jobs/<child-name>/harbor-console.log`; the
+parent owns a fixed live dashboard with one row per endpoint, refreshed once per
+second. The overall row shows total progress and the current pass rate across
+graded tasks; each endpoint row shows its own progress, pass rate, active task
+and elapsed time, pending count, and errors. Redirected or non-interactive
+output instead prints a plain status block once per minute. On Ctrl+C, the
+runner stops its Harbor children and removes containers whose Compose project
+matches a trial in that interrupted campaign. Explicit `--keep-containers` runs
+retain them as requested. Any trial result written with the exact
+`CancelledError` interruption type is also discarded and returned to the
+pending set; genuine failures and completed results are preserved.
+
+Multi-endpoint runs create `jobs/<job-name>/orchestrator.json`, with child jobs
+beside the parent named `<job-name>-endpoint1`, `<job-name>-endpoint2`, and so
+on. Resume the parent to continue an interrupted distributed run:
+
+```bash
+./terminal_bench.py resume jobs/<job-name>
+```
+
+An interrupted single-endpoint job can instead be resumed on a replacement
+endpoint or across additional equivalent endpoints. Stop the original command
+with Ctrl+C and wait for it to exit, then run either:
+
+```bash
+./terminal_bench.py resume jobs/<job-name> \
+  --endpoints http://host-a:8000/v1,http://host-b:8000/v1
+
+./terminal_bench.py resume jobs/<job-name> \
+  --endpoint http://replacement-host:8000/v1
+```
+
+The runner preserves every completed pass or genuine failure. A Ctrl+C
+`CancelledError` artifact is discarded, as is any trial without a final
+`result.json`; that task restarts from scratch without consuming an attempt.
+The unfinished tasks are distributed using the normal weighted scheduler. The
+added endpoints must advertise the stored model ID and matching model metadata
+and context. This
+changes only execution topology: model, platform, engine, backend, quant,
+profile, suite, and attempt identity remain unchanged. After the current round,
+normal conditional second attempts continue. An existing multi-endpoint
+orchestrator cannot be repartitioned; resume its parent with the endpoints it
+already records. During a redistributed resume, the overall dashboard retains
+the full suite denominator and includes preserved results in both progress and
+the live pass rate; endpoint rows remain scoped to their assigned unfinished
+tasks.
+
+### Job browser
+
+Run the built-in job browser from the repository root:
+
+```bash
+./terminal_bench.py jobs
+```
+
+It lists campaigns newest-first and folds endpoint children and conditional
+retry jobs into their parent campaign. Each entry shows start and finish or
+last-activity time, completion and pass counts, suite/tier, readable model
+name, quantization, inference profile, platform, engine/backend, endpoints, and
+the raw job name. In an interactive terminal, select a number to resume an
+incomplete campaign or rerun any campaign from scratch. Resume always displays
+the stored endpoints and asks whether to change them. Live campaigns are
+view-only, and every action that starts inference requires confirmation.
+
+For a non-interactive inventory or scripts, use:
+
+```bash
+./terminal_bench.py jobs --list-only
+./terminal_bench.py jobs --all --list-only
 ```
 
 Every benchmark run must explicitly specify `--platform`, `--engine`, and
@@ -187,12 +327,14 @@ results-explorer filters. Legacy exported metadata containing `model_tag` is
 read as quantization during migration, but new commands and exports do not use
 that field.
 
-Runs are sequential and allow up to two attempts per task. Attempt two runs
-only when attempt one fails. Terminus-2 summarizes context when it approaches
-the advertised limit. Each attempt has a three-hour agent timeout; there is no
-model-call, turn, or output-token cap. Results report the aggregate pass rate
-for the configured attempt budget: the default is pass@2, while
-`--attempts 1` produces pass@1.
+Single-endpoint runs are sequential by default. Multi-endpoint runs explicitly
+opt into parallel execution across the supplied hosts while remaining
+sequential within each host by default. Runs allow up to two attempts per task;
+attempt two runs only when attempt one fails. Terminus-2 summarizes context when
+it approaches the advertised limit. Each attempt has a three-hour agent
+timeout; there is no model-call, turn, or output-token cap. Results report the
+aggregate pass rate for the configured attempt budget: the default is pass@2,
+while `--attempts 1` produces pass@1.
 
 ### Running in tmux
 
@@ -216,44 +358,40 @@ both the live terminal output and durable result artifacts when you later ask
 for a status update.
 
 Interrupted jobs and existing failures can be continued without rerunning
-successful tasks:
+successful tasks. Pass the same custom manifest again when retrying a result
+from a non-built-in suite:
 
 ```bash
 ./terminal_bench.py resume jobs/<job-name>
-./terminal_bench.py retry-failed results/<platform>/<model>_results
+./terminal_bench.py resume jobs/<single-job-name> \
+  --endpoints http://host-a:8000/v1,http://host-b:8000/v1
+./terminal_bench.py retry-failed results/suites/<suite-hash>/<platform>/<model>_results
+./terminal_bench.py jobs
 ```
 
 ## Results
 
-Raw Harbor jobs are written to `jobs/`. Stable results are written to
-`results/<platform>/<model>_results/`, with one result and copied ATIF
-transcript per task. Quantization strings are retained in model and directory
+Raw Harbor jobs are written to `jobs/`. Manifest-backed results are written to
+`results/suites/<suite-id>-<manifest-hash>/<platform>/<model>_results/`, with
+one result and copied ATIF transcript per task. Older unscoped result paths
+remain readable. Quantization strings are retained in model and directory
 names. The exact inference engine and compute backend are recorded separately.
 
-When a run or resumed job produces a Harbor `result.json`, the runner
-automatically exports the normalized task results, writes the aggregate
-`summary.json`, and rebuilds `results/index.json`. No separate result-generation
-command is normally required. Use these commands to inspect a raw job or
-rebuild the aggregate index from existing exported results:
+When Harbor's aggregate counters confirm that a run or resumed job is terminal,
+the runner automatically exports the normalized task results, writes the
+aggregate `summary.json`, and rebuilds the relevant suite index. The presence
+of a live `result.json` alone does not mark a job complete. No separate
+result-generation command is normally required. Use these commands to inspect
+a raw job or rebuild indexes from existing exported results:
 
 ```bash
 ./terminal_bench.py summary jobs/<job-name>
 ./terminal_bench.py results
 ```
 
-The bundled preliminary baseline is:
-
-```text
-Qwen3.6-35B-A3B-UD-Q4_K_XL + MTP + Terminus-2
-AMD Strix Halo, llama.cpp, 262,144-token context
-11/20 pass@1 (55%)
-```
-
-All eleven passes occurred on attempt one. `build-pov-ray` also has a failed
-second attempt preserved in its result file; therefore the bundled data should
-be reported as pass@1, not as a complete pass-within-two run. The baseline is
-included to demonstrate the format and provide a first quantized local-model
-reference point.
+The bundled completed runs are exposed on the same 19-task Core-19 denominator;
+the removed `build-pov-ray` result does not appear in the explorer or its
+aggregates.
 
 ### Results explorer
 
@@ -263,17 +401,17 @@ timings, token usage, failure classifications, verifier excerpts, run profiles,
 and links to committed results and transcripts.
 
 After a run exports new results, regenerate the explorer's compact dataset and
-serve the repository root:
+serve only the generated documentation directory:
 
 ```bash
 python3 docs/build_data.py
-python3 -m http.server 8000
+python3 -m http.server --bind 127.0.0.1 --directory docs 8000
 ```
 
-Open `http://localhost:8000/docs/` to preview it. The site is dependency-free
+Open `http://127.0.0.1:8000/` to preview it. The site is dependency-free
 and requires no Node.js, npm, or frontend build. Run `docs/build_data.py` again
 after each new export; the running HTTP server will then serve the updated
-`docs/data.json`. Local `jobs/` directories do not need to be committed: when
+Core-19 `docs/data.json`. Local `jobs/` directories do not need to be committed: when
 present, the data builder extracts short verifier evidence into
 `docs/data.json`, while links target normalized artifacts under `results/` and
 task definitions under `tasks/`. Publishing or committing results is separate
@@ -283,11 +421,13 @@ from local visualization and should be done only when intended.
 
 ```text
 terminal_bench.py   runner and CLI
+suite_manifest.py   suite validation and deterministic task identity
+suites/             built-in suite manifests and tiers
 results.py          stable result export and indexing
-tasks/              vendored 20-task dataset
-subsets/            full and smoke task lists
+tasks/              vendored Terminal-Bench 2.1 task pool
+subsets/            legacy mini-20 task lists
 compat/podman/      Docker/Podman compatibility shim
-results/            bundled Qwen baseline and transcripts
+results/            suite-scoped results and bundled legacy baselines
 docs/               static results explorer and generated site dataset
 tests/              runner and result-store tests
 ```
@@ -298,7 +438,7 @@ Run the tests with:
 python3 -m unittest discover -s tests -v
 ```
 
-Task definitions come from
+The legacy task definitions come from
 [`harbor-framework/terminal-bench-2-1`](https://github.com/harbor-framework/terminal-bench-2-1)
 at revision `5c8eadf1f393183288fa08b8f73ca9a469cc5e00` and retain their original
 authors and Apache-2.0 license metadata.

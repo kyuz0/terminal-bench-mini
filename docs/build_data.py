@@ -8,12 +8,21 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import sys
 import tomllib
 from urllib.parse import quote
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from suite_manifest import SuiteManifest
+import results as result_store
+
+
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+DEFAULT_DOCS_SUITE = "core19"
 
 
 def read_json(path: Path) -> dict:
@@ -85,7 +94,7 @@ def classify_attempt(attempt: dict, evidence: list[str]) -> tuple[str, str]:
         if produced_tokens == 0 and steps == 0:
             return (
                 "endpoint-stall",
-                "The three-hour agent timeout expired before the endpoint returned model tokens.",
+                "The configured agent timeout expired before the endpoint returned model tokens.",
             )
         return "agent-timeout", compact_text(message) or "The agent exceeded its time limit."
 
@@ -97,8 +106,24 @@ def classify_attempt(attempt: dict, evidence: list[str]) -> tuple[str, str]:
     return "verifier-failure", "The task completed, but the verifier awarded reward 0."
 
 
-def task_metadata(repo_root: Path, task_id: str, repository: str) -> dict:
-    task_dir = repo_root / "tasks" / task_id
+def estimate_minutes(metadata: dict, audience: str) -> float | int | None:
+    """Normalize Terminal-Bench 2.x minute and 4.x hour estimates."""
+    minutes = metadata.get(f"{audience}_time_estimate_min")
+    if isinstance(minutes, (int, float)):
+        return minutes
+    hours = metadata.get(f"{audience}_time_estimate_hours")
+    if isinstance(hours, (int, float)):
+        return hours * 60
+    return None
+
+
+def task_metadata(
+    repo_root: Path,
+    task_id: str,
+    repository: str,
+    task_dir: Path | None = None,
+) -> dict:
+    task_dir = task_dir or repo_root / "tasks" / task_id
     task_toml = task_dir / "task.toml"
     payload = tomllib.loads(task_toml.read_text())
     task = payload.get("task", {})
@@ -112,8 +137,8 @@ def task_metadata(repo_root: Path, task_id: str, repository: str) -> dict:
         "category": metadata.get("category", "uncategorized"),
         "difficulty": metadata.get("difficulty", "unknown"),
         "tags": metadata.get("tags", []),
-        "expertMinutes": metadata.get("expert_time_estimate_min"),
-        "juniorMinutes": metadata.get("junior_time_estimate_min"),
+        "expertMinutes": estimate_minutes(metadata, "expert"),
+        "juniorMinutes": estimate_minutes(metadata, "junior"),
         "instruction": instruction_path.read_text().strip(),
         "sourceUrl": github_url(repository, task_dir.relative_to(repo_root).as_posix()),
         "instructionUrl": github_url(
@@ -216,7 +241,12 @@ def result_record(
     }
 
 
-def model_record(repo_root: Path, result_dir: Path, repository: str) -> dict:
+def model_record(
+    repo_root: Path,
+    result_dir: Path,
+    repository: str,
+    selected_tasks: set[str] | None = None,
+) -> dict:
     summary = read_json(result_dir / "summary.json")
     run_meta_path = result_dir / "run-meta.json"
     run_meta = read_json(run_meta_path) if run_meta_path.is_file() else {}
@@ -229,7 +259,9 @@ def model_record(repo_root: Path, result_dir: Path, repository: str) -> dict:
     for filename in summary.get("results", []):
         path = result_dir / filename
         if path.is_file():
-            results.append(result_record(repo_root, result_dir, path, repository))
+            record = result_record(repo_root, result_dir, path, repository)
+            if selected_tasks is None or record["taskId"] in selected_tasks:
+                results.append(record)
 
     pass_at_1 = sum(1 for result in results if result["passAt1"])
     passed_within_attempts = sum(1 for result in results if result["passed"])
@@ -267,7 +299,6 @@ def model_record(repo_root: Path, result_dir: Path, repository: str) -> dict:
         or summary.get("inference_profile")
         or profile.get("inference_profile")
     )
-
     return {
         "id": relative_dir,
         "name": model.get("name") or summary.get("model", {}).get("name"),
@@ -308,19 +339,61 @@ def model_record(repo_root: Path, result_dir: Path, repository: str) -> dict:
     }
 
 
-def build_dataset(repo_root: Path, repository: str) -> dict:
-    task_ids = [
-        line.strip()
-        for line in (repo_root / "subsets" / "full.txt").read_text().splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
-    tasks = [task_metadata(repo_root, task_id, repository) for task_id in task_ids]
-    result_dirs = sorted((repo_root / "results").glob("*/*_results"))
-    models = [
-        model_record(repo_root, result_dir, repository)
-        for result_dir in result_dirs
-        if (result_dir / "summary.json").is_file()
-    ]
+def docs_suite_path(repo_root: Path, value: str | Path) -> Path:
+    candidate = Path(value).expanduser()
+    if candidate.is_file():
+        return candidate.resolve()
+    return (repo_root / "suites" / f"{candidate}.json").resolve()
+
+
+def build_dataset(
+    repo_root: Path,
+    repository: str,
+    suite_value: str | Path | None = DEFAULT_DOCS_SUITE,
+    tier: str = "full",
+) -> dict:
+    suite = (
+        SuiteManifest.load(docs_suite_path(repo_root, suite_value))
+        if suite_value is not None
+        else None
+    )
+    if suite:
+        task_ids = suite.tasks_for(tier)
+        tasks = [
+            task_metadata(
+                repo_root,
+                task_id,
+                repository,
+                task_dir=suite.resolve_task(task_id).path,
+            )
+            for task_id in task_ids
+        ]
+        identity = suite.identity()
+        result_root = result_store.suite_results_root(
+            repo_root / "results", identity
+        )
+        benchmark_name = suite.name
+    else:
+        task_ids = [
+            line.strip()
+            for line in (repo_root / "subsets" / "full.txt").read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        tasks = [task_metadata(repo_root, task_id, repository) for task_id in task_ids]
+        identity = None
+        result_root = repo_root / "results"
+        benchmark_name = "Terminal Bench Mini"
+    result_dirs = sorted(result_root.glob("*/*_results"))
+    models = []
+    selected_task_ids = set(task_ids)
+    for result_dir in result_dirs:
+        if not (result_dir / "summary.json").is_file():
+            continue
+        model = model_record(
+            repo_root, result_dir, repository, selected_tasks=selected_task_ids
+        )
+        if model["totalTasks"]:
+            models.append(model)
     models.sort(
         key=lambda model: (
             -model["passWithinAttemptsRate"],
@@ -335,10 +408,12 @@ def build_dataset(repo_root: Path, repository: str) -> dict:
         "generatedAt": generated_at,
         "repository": repository,
         "benchmark": {
-            "name": "Terminal Bench Mini",
+            "name": benchmark_name,
             "taskCount": len(tasks),
             "defaultMetric": "pass-within-attempts",
             "official": False,
+            "suite": identity,
+            "tier": tier if suite else "full",
         },
         "tasks": tasks,
         "models": models,
@@ -350,6 +425,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--repository", default="kyuz0/terminal-bench-mini")
+    parser.add_argument(
+        "--suite",
+        default=DEFAULT_DOCS_SUITE,
+        help=f"Built-in suite ID or manifest path (default: {DEFAULT_DOCS_SUITE})",
+    )
+    parser.add_argument("--tier", default="full", help="Suite tier (default: full)")
     return parser.parse_args()
 
 
@@ -357,7 +438,7 @@ def main() -> None:
     args = parse_args()
     repo_root = args.repo_root.resolve()
     output = args.output or repo_root / "docs" / "data.json"
-    payload = build_dataset(repo_root, args.repository)
+    payload = build_dataset(repo_root, args.repository, args.suite, args.tier)
     output.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     print(
         f"Wrote {output} with {len(payload['models'])} model runs "

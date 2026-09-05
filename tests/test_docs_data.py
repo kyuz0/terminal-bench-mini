@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +13,17 @@ SPEC.loader.exec_module(build_data)
 
 
 class DocsDataTests(unittest.TestCase):
+    def test_time_estimates_accept_minutes_or_v4_hours(self):
+        self.assertEqual(
+            build_data.estimate_minutes({"expert_time_estimate_min": 45}, "expert"),
+            45,
+        )
+        self.assertEqual(
+            build_data.estimate_minutes({"expert_time_estimate_hours": 1.5}, "expert"),
+            90,
+        )
+        self.assertIsNone(build_data.estimate_minutes({}, "expert"))
+
     def test_verifier_excerpt_keeps_concise_failure_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "test-stdout.txt"
@@ -47,12 +59,14 @@ class DocsDataTests(unittest.TestCase):
         self.assertIn("before the endpoint returned model tokens", reason)
 
     def test_dataset_preserves_identity_and_prioritizes_within_attempts(self):
-        dataset = build_data.build_dataset(REPO_ROOT, "kyuz0/terminal-bench-local")
-        self.assertEqual(dataset["benchmark"]["taskCount"], 20)
+        dataset = build_data.build_dataset(
+            REPO_ROOT, "kyuz0/terminal-bench-local"
+        )
+        self.assertEqual(dataset["benchmark"]["taskCount"], 19)
         self.assertEqual(
             dataset["benchmark"]["defaultMetric"], "pass-within-attempts"
         )
-        self.assertEqual(len(dataset["tasks"]), 20)
+        self.assertEqual(len(dataset["tasks"]), 19)
         self.assertGreaterEqual(len(dataset["models"]), 1)
         for model in dataset["models"]:
             self.assertIn("platform", model)
@@ -108,13 +122,65 @@ class DocsDataTests(unittest.TestCase):
         qwen38_runs = [model for model in dataset["models"] if model["name"] == "Qwen3.8-27B"]
         self.assertEqual(len(qwen38_runs), 3)
 
+    def test_model_record_filters_results_to_the_selected_tier(self):
+        result_dir = next(
+            (REPO_ROOT / "results" / "suites").glob("core19-*/*/*_results")
+        )
+        complete = build_data.model_record(
+            REPO_ROOT, result_dir, "kyuz0/terminal-bench-mini"
+        )
+        task_id = complete["results"][0]["taskId"]
+        filtered = build_data.model_record(
+            REPO_ROOT,
+            result_dir,
+            "kyuz0/terminal-bench-mini",
+            selected_tasks={task_id},
+        )
+        self.assertEqual(filtered["totalTasks"], 1)
+        self.assertEqual([row["taskId"] for row in filtered["results"]], [task_id])
+
+    def test_model_record_does_not_expose_internal_migration_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo_root = Path(directory)
+            result_dir = repo_root / "results" / "test" / "model_results"
+            result_dir.mkdir(parents=True)
+            (result_dir / "summary.json").write_text(
+                '{"model":{"name":"test"},"results":[]}'
+            )
+            (result_dir / "run-meta.json").write_text(
+                """{
+                  "model": {"name": "test", "id": "test"},
+                  "platform": {"id": "test", "name": "test"},
+                  "historical_projection": {
+                    "kind": "legacy-mini20-to-core19",
+                    "status": "complete",
+                    "source_result_directory": "results/source/model_results"
+                  }
+                }"""
+            )
+            model = build_data.model_record(
+                repo_root, result_dir, "kyuz0/terminal-bench-mini"
+            )
+
+        self.assertNotIn("historicalProjection", model)
+
     def test_dataset_includes_task_instructions_but_never_solution_paths(self):
-        dataset = build_data.build_dataset(REPO_ROOT, "kyuz0/terminal-bench-local")
+        dataset = build_data.build_dataset(
+            REPO_ROOT, "kyuz0/terminal-bench-local", None
+        )
         self.assertTrue(all(task["instruction"] for task in dataset["tasks"]))
         serialized = str(dataset)
         self.assertNotIn("/solution/", serialized)
         self.assertNotIn("tasks/solution", serialized)
 
+    def test_default_dataset_is_core19(self):
+        dataset = build_data.build_dataset(REPO_ROOT, "kyuz0/terminal-bench-mini")
+        self.assertEqual(dataset["benchmark"]["suite"]["id"], "core19")
+        self.assertEqual(dataset["benchmark"]["taskCount"], 19)
+        self.assertEqual(len(dataset["tasks"]), 19)
+
+        with mock.patch("sys.argv", ["build_data.py"]):
+            self.assertEqual(build_data.parse_args().suite, "core19")
 
 if __name__ == "__main__":
     unittest.main()
