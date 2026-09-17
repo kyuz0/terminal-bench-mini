@@ -735,6 +735,13 @@ def save_runner_meta(job_name: str, meta: dict[str, Any]) -> None:
 
 def command_environment(runtime: str) -> dict[str, str]:
     environment = os.environ.copy()
+    prompt_hook = ROOT / "compat" / "harbor_prompt"
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        f"{prompt_hook}{os.pathsep}{existing_pythonpath}"
+        if existing_pythonpath
+        else str(prompt_hook)
+    )
     real_docker = shutil.which("docker")
     if not real_docker:
         raise RunnerError("docker-compatible CLI not found in PATH")

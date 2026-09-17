@@ -265,7 +265,13 @@ def model_record(
 
     pass_at_1 = sum(1 for result in results if result["passAt1"])
     passed_within_attempts = sum(1 for result in results if result["passed"])
-    total = len(results)
+    attempted = len(results)
+    total = len(selected_tasks) if selected_tasks is not None else attempted
+    max_attempts = int(run_meta.get("max_attempts") or profile.get("attempts") or 1)
+    pending_retries = sum(
+        not result["passed"] and len(result["attempts"]) < max_attempts
+        for result in results
+    )
     relative_dir = result_dir.relative_to(repo_root).as_posix()
     platform = run_meta.get("platform") or summary.get("platform") or {}
     if run_meta.get("engine") or profile.get("engine"):
@@ -324,6 +330,9 @@ def model_record(
         "profileHash": run_meta.get("profile_hash"),
         "exportedAt": run_meta.get("exported_at") or summary.get("generated_at"),
         "totalTasks": total,
+        "attemptedTasks": attempted,
+        "incomplete": attempted < total or pending_retries > 0,
+        "pendingRetries": pending_retries,
         "passAt1": pass_at_1,
         "passAt1Rate": pass_at_1 / total if total else 0,
         "passedWithinAttempts": passed_within_attempts,

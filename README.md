@@ -336,6 +336,12 @@ timeout; there is no model-call, turn, or output-token cap. Results report the
 aggregate pass rate for the configured attempt budget: the default is pass@2,
 while `--attempts 1` produces pass@1.
 
+The runner adds a brief completion cue to Terminus-2's JSON prompt: after
+finishing and checking the task, the agent should return an empty command list
+and `task_complete: true` without further explanation or optional checks.
+This cue also applies when resuming older jobs; it is not recorded as a separate
+evaluation profile.
+
 ### Running in tmux
 
 A full run is best started by the user in a persistent terminal:

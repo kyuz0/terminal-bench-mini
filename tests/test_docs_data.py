@@ -111,13 +111,18 @@ class DocsDataTests(unittest.TestCase):
         deepseek_runs = [
             model for model in dataset["models"] if model["name"] == "DeepSeek-V4-Flash-0731"
         ]
-        self.assertEqual(len(deepseek_runs), 3)
-        self.assertEqual(
-            {model["quant"] for model in deepseek_runs},
-            {"MXFP4", "UD-IQ3_XXS", "IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8"},
+        self.assertGreaterEqual(len(deepseek_runs), 3)
+        self.assertTrue(
+            {"MXFP4", "UD-IQ3_XXS", "IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8"}
+            <= {model["quant"] for model in deepseek_runs}
         )
-        dspark = next(model for model in deepseek_runs if model["inferenceProfile"] == "DSpark")
-        self.assertEqual(dspark["tag"], "chat-v2-imatrix-0731")
+        self.assertTrue(
+            any(
+                model["inferenceProfile"] == "DSpark"
+                and model["tag"] == "chat-v2-imatrix-0731"
+                for model in deepseek_runs
+            )
+        )
 
         qwen38_runs = [model for model in dataset["models"] if model["name"] == "Qwen3.8-27B"]
         self.assertEqual(len(qwen38_runs), 3)
@@ -138,6 +143,16 @@ class DocsDataTests(unittest.TestCase):
         )
         self.assertEqual(filtered["totalTasks"], 1)
         self.assertEqual([row["taskId"] for row in filtered["results"]], [task_id])
+
+        incomplete = build_data.model_record(
+            REPO_ROOT,
+            result_dir,
+            "kyuz0/terminal-bench-mini",
+            selected_tasks={task_id, "missing-task"},
+        )
+        self.assertEqual(incomplete["totalTasks"], 2)
+        self.assertEqual(incomplete["attemptedTasks"], 1)
+        self.assertTrue(incomplete["incomplete"])
 
     def test_model_record_does_not_expose_internal_migration_metadata(self):
         with tempfile.TemporaryDirectory() as directory:

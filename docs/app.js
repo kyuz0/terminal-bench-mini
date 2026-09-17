@@ -315,7 +315,7 @@ function renderModels() {
   }
   elements.modelGrid.innerHTML = models.map((model) => {
     const selected = state.selectedModels.has(model.id);
-    const average = model.totalTasks ? model.totalDurationMs / model.totalTasks : 0;
+    const average = model.attemptedTasks ? model.totalDurationMs / model.attemptedTasks : 0;
     const primaryTone = scoreTone(model.passWithinAttemptsRate);
     return `
       <article class="model-card score-${primaryTone}${selected ? " selected" : ""}" data-model-id="${escapeHtml(model.id)}">
@@ -331,6 +331,7 @@ function renderModels() {
           ${scoreBlock("pass@1", model.passAt1Rate)}
         </div>
         <div class="model-meta">
+          ${model.incomplete ? `<span class="badge">incomplete ${model.attemptedTasks}/${model.totalTasks} attempted${model.pendingRetries ? " · retries pending" : ""}</span>` : ""}
           ${model.inferenceProfile ? `<span class="badge">profile ${escapeHtml(model.inferenceProfile)}</span>` : ""}
           ${model.tag ? `<span class="badge">tag ${escapeHtml(model.tag)}</span>` : ""}
           <span class="badge">${escapeHtml(model.platform.name)}</span>
@@ -338,7 +339,7 @@ function renderModels() {
           <span class="badge">${escapeHtml(model.backend || "backend not recorded")}${model.backendVersion ? ` ${escapeHtml(model.backendVersion)}` : ""}</span>
         </div>
         <div class="model-card-footer">
-          <span class="profile-note">${model.passedWithinAttempts}/${model.totalTasks} passed within attempts · ${escapeHtml(formatDuration(average))} avg</span>
+          <span class="profile-note">${model.passedWithinAttempts}/${model.totalTasks} ${model.incomplete ? "passed so far" : "passed within attempts"} · ${escapeHtml(formatDuration(average))} avg</span>
           <button class="details-button" type="button" data-action="model-details">Run profile →</button>
         </div>
       </article>
@@ -352,10 +353,11 @@ function renderComparison(models) {
     return;
   }
   const rows = [
+    ["Coverage", (model) => `${model.attemptedTasks}/${model.totalTasks} attempted${model.incomplete ? ` (incomplete${model.pendingRetries ? "; retries pending" : ""})` : ""}`],
     ["Passed within attempts", (model) => comparisonScore(model.passedWithinAttempts, model.totalTasks, model.passWithinAttemptsRate), true],
     ["Pass@1", (model) => comparisonScore(model.passAt1, model.totalTasks, model.passAt1Rate), true],
     ["Recovery gain", (model) => `<span class="recovery-gain${model.passedWithinAttempts > model.passAt1 ? " gained" : ""}">+${model.passedWithinAttempts - model.passAt1} tasks</span>`, true],
-    ["Average task time", (model) => formatDuration(model.totalTasks ? model.totalDurationMs / model.totalTasks : 0)],
+    ["Average task time", (model) => formatDuration(model.attemptedTasks ? model.totalDurationMs / model.attemptedTasks : 0)],
     ["Total task time", (model) => formatDuration(model.totalDurationMs)],
     ["Input tokens", (model) => formatExactNumber(model.totalTokens.input)],
     ["Output tokens", (model) => formatExactNumber(model.totalTokens.output)],
@@ -449,7 +451,7 @@ function showDialog(kicker, title, html) {
 }
 
 function openModelDetails(model, updateHash = true) {
-  const average = model.totalTasks ? model.totalDurationMs / model.totalTasks : 0;
+  const average = model.attemptedTasks ? model.totalDurationMs / model.attemptedTasks : 0;
   const failed = model.results.filter((result) => !result.passed);
   const failureBreakdown = failed.reduce((counts, result) => {
     counts[result.outcomeType] = (counts[result.outcomeType] || 0) + 1;
@@ -458,6 +460,7 @@ function openModelDetails(model, updateHash = true) {
   const breakdown = Object.entries(failureBreakdown).map(([type, count]) => `${outcomeLabel(type)}: ${count}`).join(" · ") || "No final failures";
   const html = `
     <div class="dialog-badges">
+      ${model.incomplete ? `<span class="badge">incomplete ${model.attemptedTasks}/${model.totalTasks} attempted${model.pendingRetries ? " · retries pending" : ""}</span>` : ""}
       <span class="badge">within attempts ${escapeHtml(formatPercent(model.passWithinAttemptsRate))}</span>
       <span class="badge">pass@1 ${escapeHtml(formatPercent(model.passAt1Rate))}</span>
       <span class="badge">${escapeHtml(model.engine || "engine not recorded")}</span>
@@ -492,6 +495,7 @@ function openModelDetails(model, updateHash = true) {
       <section class="detail-panel">
         <h3>Aggregate result</h3>
         ${detailList([
+          ["Coverage", `${model.attemptedTasks}/${model.totalTasks} attempted${model.incomplete ? ` (incomplete${model.pendingRetries ? "; retries pending" : ""})` : ""}`, "mono"],
           ["Within attempts", `${model.passedWithinAttempts}/${model.totalTasks} (${formatPercent(model.passWithinAttemptsRate)})`, "mono"],
           ["Pass@1", `${model.passAt1}/${model.totalTasks} (${formatPercent(model.passAt1Rate)})`, "mono"],
           ["Average task", formatDuration(average), "mono"],
