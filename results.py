@@ -406,6 +406,7 @@ def normalized_attempt(
         "agent_steps": agent_steps,
         "exception": exception,
         "endpoint": endpoint,
+        "agent_timeout_seconds": ((result.get("config") or {}).get("agent") or {}).get("override_timeout_sec"),
         "transcript": transcript_name if transcript_source.is_file() else None,
         paths_key: {
             "trial": relative_to_repo(trial_dir, repo_root),
@@ -603,6 +604,8 @@ def export_job(
     repo_root: Path,
     run_meta: dict[str, Any],
     merge_existing_attempts: bool = False,
+    include_tasks: set[str] | None = None,
+    exclude_trials: set[Path] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     job_dir = job_dir.resolve()
     results_root = results_root.resolve()
@@ -623,6 +626,10 @@ def export_job(
     scope_root = suite_results_root(results_root, suite)
     grouped: dict[str, list[tuple[Path, dict[str, Any]]]] = defaultdict(list)
     for trial_dir, result in trial_results(job_dir):
+        if exclude_trials and trial_dir.resolve() in exclude_trials:
+            continue
+        if include_tasks is not None and task_id_from_trial(result) not in include_tasks:
+            continue
         grouped[task_id_from_trial(result)].append((trial_dir, result))
     task_provenance_by_task = run_meta.get("task_provenance") or {}
     if suite:

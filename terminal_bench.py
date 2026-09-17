@@ -515,6 +515,7 @@ def evaluation_profile(
             "summarization_free_tokens": SUMMARIZATION_FREE_TOKENS,
         },
         "agent_timeout_seconds": agent_timeout_seconds,
+        "model_request_timeout_seconds": agent_timeout_seconds,
     }
     if suite:
         profile["suite"] = suite
@@ -607,6 +608,7 @@ def build_config(
     agent_timeout_seconds: int,
     keep_containers: bool,
     dataset_groups: list[tuple[Path, list[str]]] | None = None,
+    model_request_timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     datasets = (
         [
@@ -645,7 +647,14 @@ def build_config(
                     "enable_summarize": True,
                     "proactive_summarization_threshold": SUMMARIZATION_FREE_TOKENS,
                     "model_info": {"max_input_tokens": context_length},
-                    "llm_kwargs": {"api_key": api_key},
+                    "llm_kwargs": {
+                        "api_key": api_key,
+                        **(
+                            {"timeout": model_request_timeout_seconds}
+                            if model_request_timeout_seconds is not None
+                            else {}
+                        ),
+                    },
                 },
             }
         ],
@@ -1132,6 +1141,56 @@ class TerminalDashboard:
             self.enabled = False
 
 
+def run_single_harbor_with_progress(
+    *,
+    command: list[str],
+    config: dict[str, Any],
+    meta: dict[str, Any],
+    runtime: str,
+    append_log: bool = False,
+) -> int:
+    """Show durable trial progress while one Harbor process owns the terminal."""
+    job_dir = JOBS_DIR / validate_job_name(str(config["job_name"]))
+    console_path = job_dir / "harbor-console.log"
+    with console_path.open("a" if append_log else "w", encoding="utf-8") as console:
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            env=command_environment(runtime),
+            stdout=console,
+            stderr=subprocess.STDOUT,
+        )
+        print(f"Harbor log:         {console_path}", flush=True)
+        dashboard = TerminalDashboard()
+        next_status = 0.0
+        try:
+            while True:
+                code = process.poll()
+                lines = [
+                    overall_live_status([config]),
+                    f"  {child_live_status(config, meta, code)}",
+                ]
+                if dashboard.enabled:
+                    dashboard.render(["Terminal-Bench live progress", *lines])
+                elif time.monotonic() >= next_status or code is not None:
+                    print("Harbor status:", *lines, sep="\n", flush=True)
+                    next_status = time.monotonic() + 60
+                if code is not None:
+                    return process.wait()
+                time.sleep(1)
+        except KeyboardInterrupt:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+        finally:
+            dashboard.close()
+
+
 def check_doctor(
     args: argparse.Namespace,
 ) -> tuple[
@@ -1340,8 +1399,8 @@ def execute_harbor_job(
     command = [*harbor_command(), "run", "--config", str(config_path), "--yes"]
     print(f"Running:            {' '.join(command)}", flush=True)
     try:
-        completed = subprocess.run(
-            command, cwd=ROOT, env=command_environment(runtime), check=False
+        return_code = run_single_harbor_with_progress(
+            command=command, config=config, meta=meta, runtime=runtime
         )
     except KeyboardInterrupt:
         print("\nRun interrupted; Harbor received the interrupt.", file=sys.stderr)
@@ -1361,14 +1420,14 @@ def execute_harbor_job(
         )
         print_results_summary(model_dir, summary)
         exported = True
-    if completed.returncode == 0 and not exported:
+    if return_code == 0 and not exported:
         print(
             f"Harbor exited before {job_name} reached a terminal state; "
             f"resume it from {job_dir}.",
             file=sys.stderr,
         )
         return 1, False
-    return completed.returncode, exported
+    return return_code, exported
 
 
 def attempt_job_name(group: str, attempt: int) -> str:
@@ -1417,7 +1476,7 @@ def build_attempt_jobs(
         if not shard:
             continue
         job_name = endpoint_job_name(
-            group, attempt, index, len(endpoints), migrated=migrated
+            group + str(meta.get("execution_suffix") or ""), attempt, index, len(endpoints), migrated=migrated
         )
         config = copy.deepcopy(base_config)
         config["job_name"] = job_name
@@ -2023,6 +2082,7 @@ def retry_failed(args: argparse.Namespace) -> int:
         agent_timeout_seconds=agent_timeout,
         keep_containers=args.keep_containers,
         dataset_groups=task_groups,
+        model_request_timeout_seconds=profile.get("model_request_timeout_seconds"),
     )
     print(f"Results:            {model_dir}")
     print(f"Failed tasks:       {len(pending)}")
@@ -2165,6 +2225,7 @@ def resume_with_endpoint_redistribution(
     api_key: str | None,
     skip_endpoint_check: bool,
     concurrency: int | None,
+    agent_timeout_seconds: int | None = None,
 ) -> int:
     """Convert an interrupted single Harbor job into a distributed orchestrator."""
     if not endpoints:
@@ -2217,6 +2278,32 @@ def resume_with_endpoint_redistribution(
         llm_kwargs = config["agents"][0]["kwargs"].setdefault("llm_kwargs", {})
         llm_kwargs["api_key"] = operational_api_key
 
+    archived_timeouts: list[str] = []
+    if agent_timeout_seconds is not None:
+        profile = copy.deepcopy(meta["evaluation_profile"])
+        original_timeout = int(profile["agent_timeout_seconds"])
+        if agent_timeout_seconds <= original_timeout:
+            raise RunnerError("Recovery timeout must exceed the original agent timeout")
+        archive = ROOT / ".runner" / "timeout-archives" / job_name
+        for trial_dir, result in result_store.trial_results(job_dir):
+            exception = result.get("exception_info") or {}
+            reward = ((result.get("verifier_result") or {}).get("rewards") or {}).get("reward")
+            if exception.get("exception_type") == "AgentTimeoutError" and reward != 1:
+                destination = archive / trial_dir.name
+                if destination.exists():
+                    raise RunnerError(f"Timeout archive already contains {destination}")
+                archive.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(trial_dir), str(destination))
+        if archive.is_dir():
+            archived_timeouts = sorted(
+                str(path.relative_to(ROOT))
+                for path in archive.iterdir()
+                if path.is_dir() and (path / "result.json").is_file()
+                and (result_store.read_json(path / "result.json").get("exception_info") or {}).get("exception_type") == "AgentTimeoutError"
+            )
+        config["agents"][0]["override_timeout_sec"] = agent_timeout_seconds
+        config["agents"][0]["kwargs"]["llm_kwargs"]["timeout"] = agent_timeout_seconds
+
     configured_tasks = config_task_names(config)
     finished_rows = result_store.trial_results(job_dir)
     campaign_progress = completed_trial_progress(
@@ -2231,22 +2318,6 @@ def resume_with_endpoint_redistribution(
             "Finished trial results are not present in the stored job config: "
             + ", ".join(sorted(unexpected))
         )
-    if finished_rows:
-        model_dir, summary = result_store.export_job(
-            job_dir,
-            results_root=results_root,
-            repo_root=ROOT,
-            run_meta=meta,
-            merge_existing_attempts=True,
-        )
-        print(f"Results:             {model_dir}")
-        completed = campaign_progress["completed"]
-        passed = campaign_progress["passed"]
-        pass_text = f"{passed}/{completed} ({passed / completed:.1%})" if completed else "n/a"
-        print(
-            f"Campaign progress:   {completed}/{len(configured_tasks)} completed; "
-            f"pass {pass_text}"
-        )
     remaining = [task for task in configured_tasks if task not in finished_tasks]
     print(f"Preserved:           {len(finished_tasks)} finished task(s)")
     print(f"Redistributing:      {len(remaining)} unfinished task(s)")
@@ -2255,6 +2326,20 @@ def resume_with_endpoint_redistribution(
     migrated_meta["endpoint"] = endpoints[0]
     migrated_meta["endpoints"] = endpoints
     migrated_meta["executed_tasks"] = remaining
+    if agent_timeout_seconds is not None:
+        profile = copy.deepcopy(meta["evaluation_profile"])
+        profile["agent_timeout_seconds"] = agent_timeout_seconds
+        profile["model_request_timeout_seconds"] = agent_timeout_seconds
+        profile["timeout_recovery"] = {
+            "source_job": job_name,
+            "source_profile_hash": meta["profile_hash"],
+            "original_agent_timeout_seconds": int(meta["evaluation_profile"]["agent_timeout_seconds"]),
+            "agent_timeout_seconds": agent_timeout_seconds,
+            "preserved_tasks": sorted(finished_tasks),
+            "archived_timeout_trials": archived_timeouts,
+        }
+        migrated_meta["evaluation_profile"] = profile
+        migrated_meta["profile_hash"] = result_store.evaluation_profile_hash(profile)
     migrated_meta["topology_migration"] = {
         "source_job": job_name,
         "previous_endpoints": stored_endpoints,
@@ -2265,6 +2350,42 @@ def resume_with_endpoint_redistribution(
         "redistributed_tasks": remaining,
         "migrated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
+    if finished_rows:
+        model_dir, summary = result_store.export_job(
+            job_dir,
+            results_root=results_root,
+            repo_root=ROOT,
+            run_meta=migrated_meta,
+            merge_existing_attempts=True,
+        )
+        print(f"Results:             {model_dir}")
+        completed = campaign_progress["completed"]
+        passed = campaign_progress["passed"]
+        pass_text = f"{passed}/{completed} ({passed / completed:.1%})" if completed else "n/a"
+        print(
+            f"Campaign progress:   {completed}/{len(configured_tasks)} completed; "
+            f"pass {pass_text}"
+        )
+    if agent_timeout_seconds is not None and remaining:
+        jobs = build_attempt_jobs(
+            meta=migrated_meta, base_config=config, tasks=remaining, attempt=1
+        )
+        if any((JOBS_DIR / child_config["job_name"]).exists() for child_config, _ in jobs):
+            raise RunnerError("Recovery child already exists; inspect the campaign before resuming")
+        archive = ROOT / ".runner" / "timeout-archives" / job_name
+        archive.mkdir(parents=True, exist_ok=True)
+        for filename in ("config.json", "runner-meta.json"):
+            saved = archive / f"original-{filename}"
+            if not saved.exists():
+                shutil.copy2(job_dir / filename, saved)
+        record_orchestrator_round(
+            group=job_name, endpoints=endpoints, attempt=1, jobs=jobs,
+            results_root=results_root, datasets=config.get("datasets") or [],
+        )
+        parent_config = copy.deepcopy(config)
+        parent_config["job_name"] = job_name
+        result_store.write_json(job_dir / "runner-meta.json", migrated_meta)
+        result_store.write_json(job_dir / "config.json", parent_config)
     attempt = int(meta.get("attempt_round") or 1)
     if remaining:
         return_code, exported = execute_attempt_round(
@@ -2304,8 +2425,12 @@ def resume_harbor_job(
     command = [*harbor_command(), "job", "resume", "--job-path", str(job_dir)]
     print(f"Resuming:           {' '.join(command)}", flush=True)
     try:
-        completed = subprocess.run(
-            command, cwd=ROOT, env=command_environment(runtime), check=False
+        return_code = run_single_harbor_with_progress(
+            command=command,
+            config=result_store.read_json(config_path),
+            meta=meta,
+            runtime=runtime,
+            append_log=True,
         )
     except KeyboardInterrupt:
         print("\nResume interrupted; Harbor received the interrupt.", file=sys.stderr)
@@ -2326,14 +2451,14 @@ def resume_harbor_job(
         )
         print_results_summary(model_dir, summary)
         exported = True
-    if completed.returncode == 0 and not exported:
+    if return_code == 0 and not exported:
         print(
             f"Harbor exited before {job_dir.name} reached a terminal state; "
             "it remains resumable.",
             file=sys.stderr,
         )
         return 1, False, meta
-    return completed.returncode, exported, meta
+    return return_code, exported, meta
 
 
 def saved_job_config(job_name: str, job_dir: Path) -> dict[str, Any]:
@@ -2348,6 +2473,272 @@ def saved_job_config(job_name: str, job_dir: Path) -> dict[str, Any]:
     raise RunnerError(f"Harbor job config not found for {job_dir}")
 
 
+def recover_orchestrator_job(
+    *, parent_dir: Path, endpoints: list[str], agent_timeout: int,
+    results_root: Path, runtime: str, api_key: str | None,
+    concurrency: int | None,
+    prepare_only: bool = False,
+    keep_timeout_passes: bool = True,
+) -> int:
+    """Explicitly reset first-round agent timeouts, retaining original evidence.
+
+    This creates a distinct evaluation profile: carried results retain their
+    original per-trial timeout and reset failures are listed in its provenance.
+    Original child jobs are never modified or deleted.
+    """
+    if parent_dir.parent.resolve() != JOBS_DIR.resolve():
+        raise RunnerError("Recovery requires a campaign directly below jobs/")
+    manifest_path = parent_dir / "orchestrator.json"
+    if not manifest_path.is_file():
+        raise RunnerError("Timeout recovery requires a distributed orchestrator parent")
+    manifest = result_store.read_json(manifest_path)
+    if set(manifest.get("rounds") or {}) != {"1"} or manifest.get("prepared_recovery"):
+        raise RunnerError("Recovery supports only a stopped first-round campaign without a pending preparation")
+    child_names = [validate_job_name(name) for name in manifest["rounds"]["1"]]
+    if any(harbor_job_process_is_live(name) for name in [parent_dir.name, *child_names]):
+        raise RunnerError("Campaign is still running; stop it and wait for cleanup first")
+    sources = [(JOBS_DIR / name, load_resume_meta(JOBS_DIR / name),
+                saved_job_config(name, JOBS_DIR / name)) for name in child_names]
+    if not sources:
+        raise RunnerError("Campaign has no source jobs")
+    meta = copy.deepcopy(sources[0][1])
+    config = copy.deepcopy(sources[0][2])
+    original_profile = copy.deepcopy(meta["evaluation_profile"])
+    original_timeout = int(original_profile["agent_timeout_seconds"])
+    if agent_timeout <= original_timeout:
+        raise RunnerError("Recovery timeout must exceed the original agent timeout")
+    if concurrency is not None and concurrency < 1:
+        raise RunnerError("--concurrency must be positive")
+    endpoints = endpoints or list(manifest["endpoints"])
+    operational_key = api_key or config["agents"][0]["kwargs"].get("llm_kwargs", {}).get("api_key") or "local"
+    for _, source_meta, _ in sources:
+        validate_stored_harbor_version(source_meta)
+        if source_meta["profile_hash"] != meta["profile_hash"]:
+            raise RunnerError("Source jobs have different evaluation profiles")
+    if not prepare_only:
+        validate_resume_endpoints(meta, endpoints, operational_key, skip_check=False)
+    # Earlier recoveries contain carried passes in their original child jobs.
+    # Include those sources, but never re-import excluded historical attempts.
+    previous_recovery = copy.deepcopy(manifest.get("recovery") or {})
+    if previous_recovery:
+        _, _, members = campaign_context(parent_dir)
+        active_names = set(child_names)
+        for member in members:
+            if member != parent_dir and member.name not in active_names:
+                sources.append((member, load_resume_meta(member),
+                                saved_job_config(member.name, member)))
+    config["datasets"] = copy.deepcopy(manifest["datasets"])
+    requested = config_task_names(config)
+    retained: list[tuple[Path, dict[str, Any]]] = []
+    excluded: list[str] = list(previous_recovery.get("excluded_trials") or [])
+    reset_tasks: list[str] = []
+    seen: set[str] = set()
+    for source_dir, _, _ in sources:
+        for trial_dir, result in result_store.trial_results(source_dir):
+            relative_trial = str(trial_dir.relative_to(JOBS_DIR))
+            if relative_trial in excluded:
+                continue
+            task = result_store.task_id_from_trial(result)
+            if task not in requested or task in seen:
+                raise RunnerError("Recovery requires one first-round result per configured task")
+            seen.add(task)
+            exception_type = (result.get("exception_info") or {}).get("exception_type")
+            reward = ((result.get("verifier_result") or {}).get("rewards") or {}).get("reward")
+            reset_timeout = exception_type == "AgentTimeoutError" and not (keep_timeout_passes and reward == 1)
+            if reset_timeout or exception_type == "CancelledError":
+                excluded.append(relative_trial)
+                if exception_type == "AgentTimeoutError":
+                    reset_tasks.append(task)
+            else:
+                retained.append((trial_dir, result))
+    finished = {result_store.task_id_from_trial(row) for _, row in retained}
+    remaining = [task for task in requested if task not in finished]
+    if not remaining:
+        raise RunnerError("No tasks remain to recover")
+    recovery = {
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "source_profile_hash": meta["profile_hash"],
+        "original_agent_timeout_seconds": original_timeout,
+        "agent_timeout_seconds": agent_timeout,
+        "preserved_tasks": sorted(finished),
+        "reset_tasks": sorted(reset_tasks),
+        "excluded_trials": sorted(excluded),
+        "original_rounds": copy.deepcopy(manifest["rounds"]),
+        "original_endpoints": list(manifest["endpoints"]),
+        "generation": int(previous_recovery.get("generation") or bool(previous_recovery)) + 1,
+        "previous_recovery": previous_recovery or None,
+        "keep_timeout_passes": keep_timeout_passes,
+    }
+    profile = copy.deepcopy(original_profile)
+    profile["agent_timeout_seconds"] = agent_timeout
+    if "model_request_timeout_seconds" in profile:
+        profile["model_request_timeout_seconds"] = agent_timeout
+    profile["timeout_recovery"] = {key: value for key, value in recovery.items()
+                                  if key not in {"created_at", "original_endpoints", "original_rounds"}}
+    meta.update(job_name=parent_dir.name, attempt_group=parent_dir.name,
+                endpoint=endpoints[0], endpoints=endpoints, executed_tasks=remaining,
+                requested_tasks=requested, execution_suffix=f"-recovery{recovery['generation']}",
+                evaluation_profile=profile,
+                profile_hash=result_store.evaluation_profile_hash(profile))
+    config["job_name"] = parent_dir.name
+    config["agents"][0]["override_timeout_sec"] = agent_timeout
+    if "model_request_timeout_seconds" in profile:
+        config["agents"][0]["kwargs"]["llm_kwargs"]["timeout"] = agent_timeout
+    config["agents"][0]["kwargs"]["llm_kwargs"]["api_key"] = operational_key
+    if concurrency is not None:
+        config["n_concurrent_trials"] = concurrency
+    # Validate destination names before any campaign mutation or export.
+    for child_config, _ in build_attempt_jobs(meta=meta, base_config=config, tasks=remaining, attempt=1):
+        if (JOBS_DIR / child_config["job_name"]).exists():
+            raise RunnerError("Recovery child already exists; inspect and resume its parent")
+    archive = parent_dir / ("recovery-archive" if recovery["generation"] == 1
+                            else f"recovery-archive-{recovery['generation']}")
+    archive.mkdir(mode=0o700)
+    shutil.copy2(manifest_path, archive / "orchestrator.json")
+    result_store.write_json(archive / "recovery.json", recovery)
+    for source_dir, source_meta, _ in sources:
+        carried_meta = copy.deepcopy(meta)
+        carried_meta.update(job_name=source_dir.name, endpoint=source_meta["endpoint"],
+                            executed_tasks=sorted(finished))
+        result_store.export_job(source_dir, results_root=results_root, repo_root=ROOT,
+                                run_meta=carried_meta, merge_existing_attempts=True,
+                                include_tasks=finished,
+                                exclude_trials={(JOBS_DIR / name).resolve() for name in excluded})
+    manifest.update(endpoints=endpoints, rounds={}, recovery=recovery)
+    result_store.write_json(manifest_path, manifest)
+    result_store.write_json(parent_dir / "runner-meta.json", meta)
+    result_store.write_json(parent_dir / "config.json", config)
+    progress = completed_trial_progress(retained, total=len(requested))
+    print(f"Recovery: {len(finished)} retained; {len(reset_tasks)} agent timeouts reset; {len(remaining)} tasks remaining; {agent_timeout}s per attempt", flush=True)
+    if prepare_only:
+        manifest["prepared_recovery"] = {"tasks": remaining, "campaign_progress": progress}
+        result_store.write_json(manifest_path, manifest)
+        print("Prepared only; no inference started. Resume the parent when ready.", flush=True)
+        return 0
+    code, exported = execute_attempt_round(
+        meta=meta, base_config=config, tasks=remaining, attempt=1,
+        results_root=results_root, runtime=runtime, merge_existing_attempts=True,
+        campaign_progress=progress,
+    )
+    if code != 0 or not exported:
+        return code
+    return continue_conditional_attempts(meta=meta, base_config=config,
+                                         completed_round=1, results_root=results_root,
+                                         runtime=runtime)
+
+
+def repartition_orchestrator_job(
+    *, parent_dir: Path, endpoints: list[str], results_root: Path,
+    runtime: str, api_key: str | None, concurrency: int | None,
+) -> int:
+    """Continue a stopped first round on new endpoints without changing its profile."""
+    if parent_dir.parent.resolve() != JOBS_DIR.resolve():
+        raise RunnerError("Endpoint-changing resume requires a campaign directly below jobs/")
+    manifest_path = parent_dir / "orchestrator.json"
+    manifest = result_store.read_json(manifest_path)
+    if set(manifest.get("rounds") or {}) != {"1"} or manifest.get("prepared_recovery"):
+        raise RunnerError("Endpoint changes require a stopped first-round campaign")
+    child_names = [validate_job_name(name) for name in manifest["rounds"]["1"]]
+    if any(harbor_job_process_is_live(name) for name in [parent_dir.name, *child_names]):
+        raise RunnerError("Campaign is still running; stop it and wait for cleanup first")
+    meta = copy.deepcopy(load_resume_meta(parent_dir))
+    config = copy.deepcopy(saved_job_config(parent_dir.name, parent_dir))
+    validate_stored_harbor_version(meta)
+    if concurrency is not None:
+        if concurrency < 1:
+            raise RunnerError("--concurrency must be positive")
+        config["n_concurrent_trials"] = concurrency
+    config["datasets"] = copy.deepcopy(manifest["datasets"])
+    requested = list(meta.get("requested_tasks") or config_task_names(config))
+    if set(requested) != set(config_task_names(config)):
+        raise RunnerError("Stored campaign tasks do not match its dataset catalog")
+    key = api_key or config["agents"][0]["kwargs"].get("llm_kwargs", {}).get("api_key") or "local"
+    validate_resume_endpoints(meta, endpoints, key, skip_check=False)
+    config["agents"][0]["kwargs"].setdefault("llm_kwargs", {})["api_key"] = key
+
+    _, _, members = campaign_context(parent_dir)
+    sources: list[tuple[Path, dict[str, Any], set[str]]] = []
+    retained: list[tuple[Path, dict[str, Any]]] = []
+    seen: set[str] = set()
+    excluded = set((manifest.get("recovery") or {}).get("excluded_trials") or [])
+    for source_dir in members:
+        if not source_dir.is_dir():
+            continue
+        source_meta = load_resume_meta(source_dir)
+        validate_stored_harbor_version(source_meta)
+        if source_meta.get("profile_hash") != meta.get("profile_hash"):
+            raise RunnerError("Source jobs have different evaluation profiles")
+        if harbor_job_process_is_live(source_dir.name):
+            raise RunnerError(f"Harbor is still running for {source_dir.name}")
+        source_tasks: set[str] = set()
+        for trial_dir, result in result_store.trial_results(source_dir):
+            if str(trial_dir.relative_to(JOBS_DIR)) in excluded:
+                continue
+            if (result.get("exception_info") or {}).get("exception_type") == "CancelledError":
+                continue
+            task = result_store.task_id_from_trial(result)
+            if task not in requested or task in seen:
+                raise RunnerError("Endpoint change requires one first-round result per configured task")
+            seen.add(task)
+            source_tasks.add(task)
+            retained.append((trial_dir, result))
+        sources.append((source_dir, source_meta, source_tasks))
+    remaining = [task for task in requested if task not in seen]
+    if not remaining:
+        raise RunnerError("No unfinished first-round tasks remain to redistribute")
+
+    previous = manifest.get("repartition") or {}
+    generation = int(previous.get("generation") or 0) + 1
+    meta.update(endpoint=endpoints[0], endpoints=endpoints, executed_tasks=remaining,
+                execution_suffix=f"-repartition{generation}")
+    jobs = build_attempt_jobs(meta=meta, base_config=config, tasks=remaining, attempt=1)
+    if any((JOBS_DIR / child_config["job_name"]).exists() for child_config, _ in jobs):
+        raise RunnerError("Repartition child already exists; inspect the campaign")
+
+    archive = parent_dir / f"repartition-archive-{generation}"
+    if archive.exists():
+        raise RunnerError(f"Repartition archive already exists: {archive}")
+    archive.mkdir(mode=0o700)
+    shutil.copy2(manifest_path, archive / "orchestrator.json")
+    for source_dir, source_meta, source_tasks in sources:
+        if source_tasks:
+            result_store.export_job(
+                source_dir, results_root=results_root, repo_root=ROOT,
+                run_meta=source_meta, merge_existing_attempts=True,
+                include_tasks=source_tasks,
+                exclude_trials={(JOBS_DIR / name).resolve() for name in excluded},
+            )
+    progress = completed_trial_progress(retained, total=len(requested))
+    manifest["endpoints"] = endpoints
+    manifest["rounds"] = {"1": [child_config["job_name"] for child_config, _ in jobs]}
+    manifest["repartition"] = {
+        "generation": generation,
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "previous_endpoints": list(result_store.read_json(archive / "orchestrator.json")["endpoints"]),
+        "previous_rounds": result_store.read_json(archive / "orchestrator.json")["rounds"],
+        "preserved_tasks": sorted(seen),
+        "remaining_tasks": remaining,
+    }
+    for child_config, child_meta in jobs:
+        save_runner_meta(child_config["job_name"], child_meta)
+        write_config(child_config)
+    result_store.write_json(parent_dir / "runner-meta.json", meta)
+    result_store.write_json(parent_dir / "config.json", config)
+    result_store.write_json(manifest_path, manifest)
+    print(f"Preserved:          {len(seen)}/{len(requested)} completed; {progress['passed']} passed", flush=True)
+    print(f"Redistributing:     {len(remaining)} unfinished task(s) to {', '.join(endpoints)}", flush=True)
+    code, exported = execute_harbor_jobs(
+        jobs=jobs, results_root=results_root, runtime=runtime,
+        merge_existing_attempts=True, campaign_progress=progress,
+    )
+    if code != 0 or not exported:
+        return code
+    return continue_conditional_attempts(
+        meta=meta, base_config=config, completed_round=1,
+        results_root=results_root, runtime=runtime,
+    )
+
+
 def resume_orchestrator_job(
     *,
     parent_dir: Path,
@@ -2358,6 +2749,31 @@ def resume_orchestrator_job(
     if not manifest_path.is_file():
         raise RunnerError(f"Orchestrator metadata not found: {manifest_path}")
     manifest = result_store.read_json(manifest_path)
+    if manifest.get("prepared_recovery"):
+        meta = load_resume_meta(parent_dir)
+        config = saved_job_config(parent_dir.name, parent_dir)
+        validate_stored_harbor_version(meta)
+        if harbor_job_process_is_live(parent_dir.name):
+            raise RunnerError("Prepared campaign is already running")
+        key = config["agents"][0]["kwargs"].get("llm_kwargs", {}).get("api_key") or "local"
+        validate_resume_endpoints(meta, list(meta["endpoints"]), key, skip_check=False)
+        prepared = manifest.pop("prepared_recovery")
+        # Leave a durable round and saved configurations before launching.
+        jobs = build_attempt_jobs(meta=meta, base_config=config, tasks=prepared["tasks"], attempt=1)
+        for child_config, child_meta in jobs:
+            save_runner_meta(child_config["job_name"], child_meta)
+            write_config(child_config)
+        manifest["rounds"] = {"1": [c["job_name"] for c, _ in jobs]}
+        result_store.write_json(manifest_path, manifest)
+        code, exported = execute_harbor_jobs(
+            jobs=jobs, results_root=results_root, runtime=runtime,
+            merge_existing_attempts=True, campaign_progress=prepared["campaign_progress"],
+        )
+        if code != 0 or not exported:
+            return code
+        return continue_conditional_attempts(meta=meta, base_config=config,
+                                             completed_round=1, results_root=results_root,
+                                             runtime=runtime)
     rounds = manifest.get("rounds") or {}
     if not rounds:
         raise RunnerError(f"Orchestrator has no child jobs: {manifest_path}")
@@ -2546,7 +2962,9 @@ def discover_job_campaigns() -> list[dict[str, Any]]:
                     aggregate_times.append(parsed)
             if not member.is_dir():
                 continue
-            for _, result in result_store.trial_results(member):
+            for trial_dir, result in result_store.trial_results(member):
+                if str(trial_dir.relative_to(JOBS_DIR)) in (manifest.get("recovery") or {}).get("excluded_trials", []):
+                    continue
                 exception = result.get("exception_info") or {}
                 if exception.get("exception_type") == "CancelledError":
                     continue
@@ -2991,6 +3409,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     resume.add_argument("--api-key", default=os.getenv("TBENCH_API_KEY"))
     resume.add_argument("--skip-endpoint-check", action="store_true")
+    resume.add_argument("--agent-timeout", type=int, help="New limit in seconds; requires --reset-agent-timeouts on a stopped first-round distributed campaign")
+    resume.add_argument("--reset-agent-timeouts", action="store_true", help="Archive first-round agent timeouts and redistribute remaining tasks under a new evaluation profile")
+    resume.add_argument("--prepare-only", action="store_true", help="Prepare timeout recovery without starting inference; resume the parent later")
+    resume.add_argument("--reset-passed-timeouts", action="store_true", help="Also reset timeout trials whose final reward is 1 (passes are normally retained)")
     resume.add_argument(
         "--concurrency",
         type=int,
@@ -3074,15 +3496,45 @@ def main(argv: list[str] | None = None) -> int:
             runtime, _ = container_runtime()
             results_root = args.results_dir.resolve()
             endpoint_override = args.endpoint is not None or args.endpoints is not None
+            if args.reset_agent_timeouts or args.agent_timeout is not None or args.prepare_only or args.reset_passed_timeouts:
+                if not args.reset_agent_timeouts or args.agent_timeout is None:
+                    raise RunnerError("Recovery requires both --reset-agent-timeouts and --agent-timeout")
+                if not (job_dir / "orchestrator.json").is_file():
+                    if not endpoint_override:
+                        raise RunnerError("Single-job timeout recovery requires --endpoint or --endpoints")
+                    if args.prepare_only or args.reset_passed_timeouts:
+                        raise RunnerError("Single-job timeout recovery does not support --prepare-only or --reset-passed-timeouts")
+                    return resume_with_endpoint_redistribution(
+                        job_dir=job_dir,
+                        endpoints=connection_endpoints(args),
+                        results_root=results_root,
+                        runtime=runtime,
+                        api_key=args.api_key,
+                        skip_endpoint_check=args.skip_endpoint_check,
+                        concurrency=args.concurrency,
+                        agent_timeout_seconds=args.agent_timeout,
+                    )
+                return recover_orchestrator_job(
+                    parent_dir=job_dir,
+                    endpoints=connection_endpoints(args) if endpoint_override else [],
+                    agent_timeout=args.agent_timeout,
+                    results_root=results_root, runtime=runtime, api_key=args.api_key,
+                    concurrency=args.concurrency,
+                    prepare_only=args.prepare_only,
+                    keep_timeout_passes=not args.reset_passed_timeouts,
+                )
             if (job_dir / "orchestrator.json").is_file():
                 if endpoint_override:
                     manifest = result_store.read_json(job_dir / "orchestrator.json")
                     requested_endpoints = connection_endpoints(args)
                     if requested_endpoints != list(manifest.get("endpoints") or []):
-                        raise RunnerError(
-                            "Changing endpoints is supported when converting an "
-                            "interrupted single job; an existing distributed "
-                            "orchestrator cannot yet be repartitioned"
+                        return repartition_orchestrator_job(
+                            parent_dir=job_dir,
+                            endpoints=requested_endpoints,
+                            results_root=results_root,
+                            runtime=runtime,
+                            api_key=args.api_key,
+                            concurrency=args.concurrency,
                         )
                 return resume_orchestrator_job(
                     parent_dir=job_dir,
@@ -3246,6 +3698,7 @@ def main(argv: list[str] | None = None) -> int:
             agent_timeout_seconds=args.agent_timeout,
             keep_containers=args.keep_containers,
             dataset_groups=suite.grouped_tasks(tasks),
+            model_request_timeout_seconds=args.agent_timeout,
         )
         print(
             f"Suite:              {suite.id} {suite.version} "

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 from pathlib import Path
@@ -351,11 +353,13 @@ class TerminalBenchRunnerTests(unittest.TestCase):
             context_length=262144,
             agent_timeout_seconds=10800,
             keep_containers=False,
+            model_request_timeout_seconds=10800,
         )
         agent = config["agents"][0]
         self.assertEqual(config["n_concurrent_trials"], 1)
         self.assertEqual(config["n_attempts"], 1)
         self.assertEqual(agent["override_timeout_sec"], 10800)
+        self.assertEqual(agent["kwargs"]["llm_kwargs"]["timeout"], 10800)
         self.assertEqual(agent["name"], "terminus-2")
         self.assertNotIn("max_tokens", agent["kwargs"])
         self.assertNotIn("max_turns", agent["kwargs"])
@@ -369,6 +373,39 @@ class TerminalBenchRunnerTests(unittest.TestCase):
             agent["model_name"],
             "openai//models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
         )
+
+    def test_single_harbor_run_reports_progress_when_output_is_piped(self):
+        class Process:
+            def __init__(self):
+                self.polls = 0
+
+            def poll(self):
+                self.polls += 1
+                return None if self.polls == 1 else 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            jobs_dir = Path(directory) / "jobs"
+            (jobs_dir / "single").mkdir(parents=True)
+            output = io.StringIO()
+            with (
+                mock.patch.object(terminal_bench, "JOBS_DIR", jobs_dir),
+                mock.patch.object(terminal_bench.subprocess, "Popen", return_value=Process()),
+                mock.patch.object(terminal_bench.time, "sleep"),
+                contextlib.redirect_stdout(output),
+            ):
+                code = terminal_bench.run_single_harbor_with_progress(
+                    command=["harbor", "run"],
+                    config={"job_name": "single", "datasets": [{"task_names": ["a"]}]},
+                    meta={"endpoint": "http://localhost:8000/v1"},
+                    runtime="docker",
+                )
+            self.assertEqual(code, 0)
+            self.assertIn("Harbor status:", output.getvalue())
+            self.assertIn("Overall", output.getvalue())
+            self.assertIn("0/1", output.getvalue())
 
     def test_config_display_redacts_api_key_and_file_is_private(self):
         config = terminal_bench.build_config(
@@ -1083,6 +1120,129 @@ class TerminalBenchRunnerTests(unittest.TestCase):
         self.assertEqual(args.endpoints, ["http://host-a/v1,http://host-b/v1"])
         self.assertEqual(args.concurrency, 2)
 
+    def test_repartition_stopped_orchestrator_preserves_results_and_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs_dir = root / "jobs"
+            parent = jobs_dir / "campaign"
+            parent.mkdir(parents=True)
+            profile = {"agent_timeout_seconds": 18000, "model_request_timeout_seconds": 18000}
+            profile_hash = terminal_bench.result_store.evaluation_profile_hash(profile)
+            meta = {
+                "job_name": "campaign", "attempt_group": "campaign", "attempt_round": 1,
+                "requested_tasks": ["done-a", "done-b", "pending"],
+                "endpoint": "http://a/v1", "endpoints": ["http://a/v1", "http://b/v1"],
+                "evaluation_profile": profile, "profile_hash": profile_hash,
+                "topology_migration": {"source_job": "campaign"},
+            }
+            config = {
+                "job_name": "campaign", "n_concurrent_trials": 1,
+                "agents": [{"override_timeout_sec": 18000, "kwargs": {
+                    "api_base": "http://a/v1", "llm_kwargs": {"api_key": "local", "timeout": 18000}}}],
+                "datasets": [{"path": "/tasks", "task_names": ["done-a", "done-b", "pending"]}],
+            }
+            terminal_bench.result_store.write_json(parent / "runner-meta.json", meta)
+            terminal_bench.result_store.write_json(parent / "config.json", config)
+            terminal_bench.result_store.write_json(parent / "orchestrator.json", {
+                "attempt_group": "campaign", "endpoints": meta["endpoints"],
+                "datasets": config["datasets"],
+                "rounds": {"1": ["campaign-endpoint1", "campaign-endpoint2"]},
+            })
+            for name, task in (("campaign-endpoint1", "done-a"), ("campaign-endpoint2", "done-b")):
+                child = jobs_dir / name
+                child.mkdir()
+                terminal_bench.result_store.write_json(child / "runner-meta.json", {
+                    **meta, "job_name": name, "endpoint": "http://a/v1" if task == "done-a" else "http://b/v1",
+                })
+                terminal_bench.result_store.write_json(child / f"{task}__trial" / "result.json", {
+                    "task_name": task, "trial_name": f"{task}__trial",
+                    "verifier_result": {"rewards": {"reward": 1.0}},
+                })
+            with (
+                mock.patch.object(terminal_bench, "JOBS_DIR", jobs_dir),
+                mock.patch.object(terminal_bench, "harbor_job_process_is_live", return_value=False),
+                mock.patch.object(terminal_bench, "validate_stored_harbor_version"),
+                mock.patch.object(terminal_bench, "validate_resume_endpoints") as validate,
+                mock.patch.object(terminal_bench.result_store, "export_job", return_value=(root / "results", {})) as export,
+                mock.patch.object(terminal_bench, "save_runner_meta"),
+                mock.patch.object(terminal_bench, "write_config"),
+                mock.patch.object(terminal_bench, "execute_harbor_jobs", return_value=(1, False)) as execute,
+            ):
+                code = terminal_bench.repartition_orchestrator_job(
+                    parent_dir=parent, endpoints=["http://b/v1"],
+                    results_root=root / "results", runtime="podman",
+                    api_key=None, concurrency=None,
+                )
+            self.assertEqual(code, 1)
+            validate.assert_called_once()
+            self.assertEqual(export.call_count, 2)
+            self.assertEqual(execute.call_args.kwargs["campaign_progress"], {
+                "total": 3, "completed": 2, "passed": 2, "graded": 2, "errors": 0,
+            })
+            child_config, child_meta = execute.call_args.kwargs["jobs"][0]
+            self.assertEqual(child_config["agents"][0]["kwargs"]["api_base"], "http://b/v1")
+            self.assertEqual(child_config["agents"][0]["kwargs"]["llm_kwargs"]["timeout"], 18000)
+            self.assertEqual(child_meta["profile_hash"], profile_hash)
+            self.assertEqual(child_meta["executed_tasks"], ["pending"])
+            self.assertEqual(terminal_bench.result_store.read_json(parent / "orchestrator.json")["endpoints"], ["http://b/v1"])
+            self.assertTrue((jobs_dir / "campaign-endpoint1" / "done-a__trial" / "result.json").exists())
+
+    def test_single_job_timeout_recovery_carries_passes_under_new_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs_dir = root / "jobs"
+            job_dir = jobs_dir / "campaign"
+            job_dir.mkdir(parents=True)
+            profile = {"agent_timeout_seconds": 10800, "agent": {"context_length": 262144}}
+            meta = {
+                "job_name": "campaign", "attempt_group": "campaign",
+                "attempt_round": 1, "requested_tasks": ["pass", "timeout"],
+                "endpoint": "http://a/v1", "endpoints": ["http://a/v1"],
+                "evaluation_profile": profile,
+                "profile_hash": terminal_bench.result_store.evaluation_profile_hash(profile),
+            }
+            config = {
+                "job_name": "campaign", "n_concurrent_trials": 1,
+                "agents": [{"override_timeout_sec": 10800, "kwargs": {
+                    "api_base": "http://a/v1", "llm_kwargs": {"api_key": "local"}}}],
+                "datasets": [{"path": "/tasks", "task_names": ["pass", "timeout"]}],
+            }
+            terminal_bench.result_store.write_json(job_dir / "runner-meta.json", meta)
+            terminal_bench.result_store.write_json(job_dir / "config.json", config)
+            for task, exception, reward in (("pass", None, 1), ("timeout", "AgentTimeoutError", 0)):
+                trial = job_dir / f"{task}__trial"
+                terminal_bench.result_store.write_json(trial / "result.json", {
+                    "task_name": task, "trial_name": trial.name,
+                    "verifier_result": {"rewards": {"reward": reward}},
+                    "exception_info": {"exception_type": exception} if exception else None,
+                })
+            with (
+                mock.patch.object(terminal_bench, "ROOT", root),
+                mock.patch.object(terminal_bench, "JOBS_DIR", jobs_dir),
+                mock.patch.object(terminal_bench, "harbor_job_process_is_live", return_value=False),
+                mock.patch.object(terminal_bench, "validate_resume_endpoints"),
+                mock.patch.object(terminal_bench.result_store, "export_job", return_value=(root / "results", {})) as export,
+                mock.patch.object(terminal_bench, "execute_attempt_round", return_value=(1, False)) as execute,
+            ):
+                self.assertEqual(terminal_bench.resume_with_endpoint_redistribution(
+                    job_dir=job_dir, endpoints=["http://a/v1", "http://b/v1"],
+                    results_root=root / "results", runtime="podman", api_key=None,
+                    skip_endpoint_check=False, concurrency=None,
+                    agent_timeout_seconds=18000,
+                ), 1)
+            call = execute.call_args.kwargs
+            self.assertEqual(call["tasks"], ["timeout"])
+            self.assertEqual(call["base_config"]["agents"][0]["override_timeout_sec"], 18000)
+            self.assertEqual(call["base_config"]["agents"][0]["kwargs"]["llm_kwargs"]["timeout"], 18000)
+            self.assertEqual(call["meta"]["evaluation_profile"]["model_request_timeout_seconds"], 18000)
+            self.assertNotEqual(call["meta"]["profile_hash"], meta["profile_hash"])
+            self.assertEqual(call["campaign_progress"]["completed"], 1)
+            self.assertTrue((root / ".runner" / "timeout-archives" / "campaign" / "timeout__trial" / "result.json").exists())
+            self.assertTrue((root / ".runner" / "timeout-archives" / "campaign" / "original-runner-meta.json").exists())
+            self.assertEqual(terminal_bench.result_store.read_json(job_dir / "runner-meta.json")["profile_hash"], call["meta"]["profile_hash"])
+            self.assertTrue((job_dir / "orchestrator.json").is_file())
+            self.assertEqual(export.call_args.kwargs["run_meta"]["profile_hash"], call["meta"]["profile_hash"])
+
     def test_resume_redistribution_requires_an_endpoint(self):
         with self.assertRaisesRegex(
             terminal_bench.RunnerError, "requires at least one"
@@ -1439,6 +1599,7 @@ class TerminalBenchRunnerTests(unittest.TestCase):
         self.assertEqual(profile["engine_version"], "b1234")
         self.assertEqual(profile["backend"], "vulkan")
         self.assertEqual(profile["backend_version"], "1.4.304")
+        self.assertEqual(profile["model_request_timeout_seconds"], 10800)
         self.assertNotIn("rocm_version", profile)
         self.assertNotIn("endpoints", profile)
 

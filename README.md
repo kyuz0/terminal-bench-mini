@@ -237,6 +237,12 @@ with Ctrl+C and wait for it to exit, then run either:
   --endpoint http://replacement-host:8000/v1
 ```
 
+To rerun failed agent timeouts from a stopped single-endpoint job with a longer
+agent and LiteLLM request timeout while moving to multiple endpoints, add
+`--reset-agent-timeouts --agent-timeout <seconds>` to the `--endpoints` resume
+command. The runner archives those timeout trials, retains finished tasks, and
+records the longer limit and carried results in a distinct evaluation profile.
+
 The runner preserves every completed pass or genuine failure. A Ctrl+C
 `CancelledError` artifact is discarded, as is any trial without a final
 `result.json`; that task restarts from scratch without consuming an attempt.
@@ -245,12 +251,44 @@ added endpoints must advertise the stored model ID and matching model metadata
 and context. This
 changes only execution topology: model, platform, engine, backend, quant,
 profile, suite, and attempt identity remain unchanged. After the current round,
-normal conditional second attempts continue. An existing multi-endpoint
-orchestrator cannot be repartitioned; resume its parent with the endpoints it
-already records. During a redistributed resume, the overall dashboard retains
+normal conditional second attempts continue. Ordinary resume of an existing
+multi-endpoint orchestrator uses its recorded endpoints. To move a stopped
+first-round distributed campaign to a different endpoint set, resume its parent
+with `--endpoint <url>` or `--endpoints <urls>`. This retains the original
+evaluation profile and completed trials, and archives the previous topology
+under the parent job. During a redistributed resume, the overall dashboard retains
 the full suite denominator and includes preserved results in both progress and
 the live pass rate; endpoint rows remain scoped to their assigned unfinished
 tasks.
+
+For a stopped distributed campaign still in its first attempt round,
+explicit timeout recovery can reset agent-timeout tasks and redistribute the
+remaining work with a higher limit:
+
+```bash
+./terminal_bench.py resume jobs/<parent-job-name> \
+  --endpoints http://localhost:8000/v1,http://localhost:8001/v1,http://localhost:8002/v1 \
+  --reset-agent-timeouts --agent-timeout 18000
+```
+
+Add `--prepare-only` to save the recovery without starting inference. A later
+ordinary `resume jobs/<parent-job-name>` validates the saved endpoints and
+launches the prepared shards concurrently. Preparation can change the endpoint
+list, including reducing it. Successful trials with an agent-timeout exception
+are retained when their final reward is exactly `1`; use
+`--reset-passed-timeouts` only to explicitly discard those passes too.
+
+This preserves completed non-timeout results and all original child artifacts.
+The original manifest and reset-task inventory are archived under the parent's
+`recovery-archive/`; old agent timeouts no longer consume the recovered attempt
+budget. Verifier failures and other errors remain attempts. Recovery creates a
+distinct evaluation profile recording the original timeout, carried tasks, and
+excluded trials; each exported attempt records its actual timeout when available.
+It is a modified evaluation policy, not a standard default-timeout score. Further
+interruptions resume the parent normally, without repeating the recovery flags.
+Further resets with a higher timeout are supported while the campaign remains
+in its first attempt round. Each reset archives the previous manifest and
+preserves earlier exclusions and carried passes under a new evaluation profile.
 
 ### Job browser
 
@@ -332,15 +370,23 @@ opt into parallel execution across the supplied hosts while remaining
 sequential within each host by default. Runs allow up to two attempts per task;
 attempt two runs only when attempt one fails. Terminus-2 summarizes context when
 it approaches the advertised limit. Each attempt has a three-hour agent
-timeout; there is no model-call, turn, or output-token cap. Results report the
-aggregate pass rate for the configured attempt budget: the default is pass@2,
-while `--attempts 1` produces pass@1.
+timeout; there is no separate model-call limit below that timeout, or turn or
+output-token cap. Results report the aggregate pass rate for the configured
+attempt budget: the default is pass@2,
+while `--attempts 1` produces pass@1. New runs set LiteLLM's per-request timeout
+to the agent timeout, so a slow model response is not cut off by LiteLLM's
+shorter default. Existing jobs retain their stored request-timeout setting
+when resumed.
 
 The runner adds a brief completion cue to Terminus-2's JSON prompt: after
 finishing and checking the task, the agent should return an empty command list
 and `task_complete: true` without further explanation or optional checks.
 This cue also applies when resuming older jobs; it is not recorded as a separate
 evaluation profile.
+
+Single-endpoint runs and resumes display task progress in the terminal. When
+output is piped through a program such as `tee`, they print a status line every
+minute instead of using an in-place display.
 
 ### Running in tmux
 

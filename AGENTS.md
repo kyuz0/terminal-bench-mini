@@ -293,9 +293,17 @@ more equivalent endpoints:
   for `--concurrency`. Preserve the stored API key unless the replacement
   endpoints require a supplied `--api-key` or `TBENCH_API_KEY`. Never echo the
   key.
-- Endpoint redistribution is supported only when converting an interrupted
-  original single job. Do not attempt to repartition an existing distributed
-  orchestrator; resume its parent with its recorded topology.
+- Ordinary endpoint redistribution supports interrupted original single jobs.
+  An explicit `--reset-agent-timeouts --agent-timeout <seconds>` recovery also
+  supports repartition of a stopped first-round distributed
+  campaign. It retains original child artifacts, archives the original
+  manifest, resets only failed agent timeouts and cancellations, and records a new
+  evaluation profile with the original timeout and carried-task provenance.
+  Resume recovered campaigns normally without repeating recovery flags.
+  An explicitly requested further timeout increase can repeat recovery during
+  round one. Preserve reward-1 timeout trials unless the user explicitly opts
+  into `--reset-passed-timeouts`. Use `--prepare-only` when the user wants to
+  defer launch; this saves the selected endpoints and timeout without inference.
 - Keep all original job artifacts. Starting this resume launches inference, so
   an agent must still have the user's explicit permission before executing it.
 
@@ -320,7 +328,7 @@ or `--all` for a read-only inventory.
 - Before resume, the browser displays the stored endpoints and asks whether to
   change them. An original single-endpoint job can move to one replacement
   endpoint or expand to multiple matching endpoints. Existing distributed
-  orchestrators cannot be repartitioned.
+  orchestrators cannot be repartitioned through the interactive browser.
 - A fresh rerun reconstructs the stored suite/tier, model, context, platform,
   engine/backend, quant, profile, attempt budget, timeout, concurrency, and
   container policy. Never infer or silently alter those identity fields.
