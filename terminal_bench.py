@@ -1583,12 +1583,15 @@ def execute_harbor_jobs(
     merge_existing_attempts: bool,
     dry_run: bool = False,
     campaign_progress: dict[str, int] | None = None,
+    resume_existing: bool = False,
 ) -> tuple[int, bool]:
-    """Run Harbor jobs concurrently without mixing their terminal renderers."""
+    """Run or resume Harbor jobs concurrently without mixing terminal renderers."""
     for config, _ in jobs:
         job_name = validate_job_name(str(config["job_name"]))
         job_dir = JOBS_DIR / job_name
-        if job_dir.exists():
+        if resume_existing and not job_dir.exists():
+            raise RunnerError(f"Harbor job directory not found: {job_dir}")
+        if not resume_existing and job_dir.exists():
             raise RunnerError(
                 f"Job directory already exists: {job_dir}. Resume the parent "
                 "orchestrator to continue it."
@@ -1597,8 +1600,16 @@ def execute_harbor_jobs(
     prepared: list[tuple[dict[str, Any], dict[str, Any], Path]] = []
     for config, meta in jobs:
         job_name = validate_job_name(str(config["job_name"]))
-        save_runner_meta(job_name, meta)
-        config_path = write_config(config)
+        job_dir = JOBS_DIR / job_name
+        if resume_existing:
+            secure_job_directory(job_dir)
+            discard_cancelled_trials(job_dir)
+            config_path = job_dir / "config.json"
+            if not config_path.is_file():
+                raise RunnerError(f"Harbor job config not found: {config_path}")
+        else:
+            save_runner_meta(job_name, meta)
+            config_path = write_config(config)
         print(f"Child job:          {job_name}")
         print(f"Config:             {config_path}")
         prepared.append((config, meta, config_path))
@@ -1615,17 +1626,24 @@ def execute_harbor_jobs(
     dashboard: TerminalDashboard | None = None
     try:
         print(
-            f"Starting {len(prepared)} Harbor children concurrently. "
+            f"{'Resuming' if resume_existing else 'Starting'} "
+            f"{len(prepared)} Harbor children concurrently. "
             "Child output is isolated into per-job logs.",
             flush=True,
         )
         for index, (config, meta, config_path) in enumerate(prepared, 1):
             job_dir = JOBS_DIR / config["job_name"]
-            secure_job_directory(job_dir, create=True)
+            secure_job_directory(job_dir, create=not resume_existing)
             result_store.write_json(job_dir / "runner-meta.json", meta)
-            command = [*harbor, "run", "--config", str(config_path), "--yes"]
+            command = (
+                [*harbor, "job", "resume", "--job-path", str(job_dir)]
+                if resume_existing
+                else [*harbor, "run", "--config", str(config_path), "--yes"]
+            )
             console_path = job_dir / "harbor-console.log"
-            console = console_path.open("w", encoding="utf-8")
+            console = console_path.open(
+                "a" if resume_existing else "w", encoding="utf-8"
+            )
             try:
                 process = subprocess.Popen(
                     command,
@@ -1753,7 +1771,8 @@ def execute_harbor_jobs(
             if process.poll() is None:
                 process.send_signal(signal.SIGINT)
             console.close()
-        raise RunnerError(f"Cannot start Harbor child job: {exc}") from exc
+        action = "resume" if resume_existing else "start"
+        raise RunnerError(f"Cannot {action} Harbor child job: {exc}") from exc
 
     all_exported = True
     final_summary: tuple[Path, dict[str, Any]] | None = None
@@ -2783,6 +2802,8 @@ def resume_orchestrator_job(
 
     latest_meta: dict[str, Any] | None = None
     base_config: dict[str, Any] | None = None
+    launch_jobs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    resumable_jobs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for child_name in child_names:
         validate_job_name(child_name)
         job_dir = JOBS_DIR / child_name
@@ -2792,15 +2813,7 @@ def resume_orchestrator_job(
         latest_meta = latest_meta or meta
         base_config = base_config or config
         if not job_dir.exists():
-            return_code, exported = execute_harbor_job(
-                config=config,
-                meta=meta,
-                results_root=results_root,
-                runtime=runtime,
-                merge_existing_attempts=True,
-            )
-            if return_code != 0 or not exported:
-                return return_code
+            launch_jobs.append((config, meta))
             continue
         secure_job_directory(job_dir)
         if job_is_terminal(job_dir):
@@ -2813,10 +2826,25 @@ def resume_orchestrator_job(
             )
             print_results_summary(model_dir, summary)
             continue
-        return_code, exported, _ = resume_harbor_job(
-            job_dir=job_dir,
+        resumable_jobs.append((config, meta))
+
+    if launch_jobs:
+        return_code, exported = execute_harbor_jobs(
+            jobs=launch_jobs,
             results_root=results_root,
             runtime=runtime,
+            merge_existing_attempts=True,
+        )
+        if return_code != 0 or not exported:
+            return return_code
+
+    if resumable_jobs:
+        return_code, exported = execute_harbor_jobs(
+            jobs=resumable_jobs,
+            results_root=results_root,
+            runtime=runtime,
+            merge_existing_attempts=True,
+            resume_existing=True,
         )
         if return_code != 0 or not exported:
             return return_code
@@ -3360,12 +3388,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     doctor = sub.add_parser("doctor", help="Validate endpoint, Harbor, runtime and tasks")
     add_connection_args(doctor)
     add_suite_args(doctor, include_selection=True)
+    doctor.add_argument("--study-plan", type=Path, help="Validate a prepared private study under .runner/studies")
     list_parser = sub.add_parser("list", help="Print task tiers")
     add_suite_args(list_parser)
     run = sub.add_parser("run", help="Run Terminal-Bench-Local")
     add_connection_args(run)
     add_suite_args(run, include_selection=True)
     add_result_args(run)
+    run.add_argument("--study-plan", type=Path, help="Run a prepared private study under .runner/studies")
     run.add_argument(
         "--attempts",
         type=int,
@@ -3461,9 +3491,36 @@ def print_tiers(suite: SuiteManifest) -> None:
             print(f"  {task}")
 
 
+def run_prepared_study(args: argparse.Namespace) -> int:
+    """Keep private Pi experiments under one explicit runner invocation."""
+    plan = args.study_plan.resolve()
+    if not plan.is_relative_to((ROOT / ".runner" / "studies").resolve()):
+        raise RunnerError("Private study plans must be under .runner/studies")
+    entry = plan.parent / "campaign.py"
+    if not plan.is_file() or not entry.is_file():
+        raise RunnerError("Prepared study requires plan.json and campaign.py")
+    if args.command == "run" and (args.attempts != DEFAULT_ATTEMPTS or args.concurrency != 1):
+        raise RunnerError("Private study repetitions and concurrency are fixed in its plan")
+    uv = shutil.which("uv")
+    if not uv:
+        raise RunnerError("Prepared Pi studies require uv")
+    cli = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
+    # Authentication is already configured by the private profile, never saved.
+    cli.pop("api_key", None)
+    receipt = plan.parent / "cli-request.json"
+    receipt.write_text(json.dumps(cli, indent=2) + "\n")
+    return subprocess.call(
+        [uv, "run", "--no-project", "--offline", "--with", HARBOR_PACKAGE,
+         "python", str(entry), args.command, "--cli-request", str(receipt)],
+        cwd=ROOT,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        if getattr(args, "study_plan", None):
+            return run_prepared_study(args)
         if args.command == "list":
             print_tiers(load_suite(args.suite, args.tasks_dir))
             return 0

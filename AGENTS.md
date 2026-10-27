@@ -20,6 +20,18 @@ Keep every user-facing response direct and brief.
 
 ## Benchmark invariants
 
+- Advisor replies are free-form text. Never impose an advisor output schema,
+  parse its reply as JSON, or require semantic status fields, evidence IDs,
+  templates, or list lengths. Parse only native transport/accounting metadata.
+  Consultation policy may require calls for planning, debugging and validation;
+  the requesting model controls its requests, follow-up and interpretation.
+- The user invalidated `advisor-local-two-task-v1` and stopped its campaign on
+  2026-10-05. Preserve its artifacts and usage as historical records; do not
+  restart it or reuse its advisor-assisted results as evidence for the revised
+  advisor design. The user explicitly revalidated its six completed standalone
+  baselines later on 2026-10-05: retain those verified results and run only six
+  fresh advisor trials. Do not repeat valid completed work unnecessarily.
+
 - `suites/core19.json` is the default timeout-pruned benchmark;
   `suites/legacy-mini20.json` preserves the original mini-20. The manifest and
   tier together define the score denominator.
@@ -36,6 +48,12 @@ Keep every user-facing response direct and brief.
 - Passing multiple URLs with `--endpoints` explicitly opts into one concurrent
   task per endpoint by default. The runner validates matching model metadata
   and distributes tasks across independent Harbor child jobs.
+- For an agent-managed multi-endpoint run, launch exactly one `terminal_bench.py
+  run --endpoints URL1,URL2` command in exactly one user-facing local tmux
+  session. Endpoint Harbor children belong to that one campaign; never launch
+  separate runner commands or runner tmux sessions per endpoint. Separate
+  inspectable tmux sessions for model servers and SSH tunnels are allowed.
+  Verify there is one benchmark runner process and one benchmark tmux session.
 - Core-19 distributed runs use deterministic longest-processing-time assignment
   from the checked-in historical mean-duration weights. Unknown suites fall
   back to round-robin assignment. Scheduling changes execution order only, not

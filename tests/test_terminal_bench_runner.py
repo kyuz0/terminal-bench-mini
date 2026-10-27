@@ -962,9 +962,9 @@ class TerminalBenchRunnerTests(unittest.TestCase):
                 mock.patch.object(terminal_bench, "JOBS_DIR", jobs_dir),
                 mock.patch.object(
                     terminal_bench,
-                    "resume_harbor_job",
-                    return_value=(1, False, meta),
-                ) as resume_job,
+                    "execute_harbor_jobs",
+                    return_value=(1, False),
+                ) as resume_jobs,
                 mock.patch.object(terminal_bench.result_store, "export_job") as export,
             ):
                 return_code = terminal_bench.resume_orchestrator_job(
@@ -974,10 +974,12 @@ class TerminalBenchRunnerTests(unittest.TestCase):
                 )
 
             self.assertEqual(return_code, 1)
-            resume_job.assert_called_once_with(
-                job_dir=child_dir,
+            resume_jobs.assert_called_once_with(
+                jobs=[({"job_name": "child-a"}, meta)],
                 results_root=root / "results",
                 runtime="podman",
+                merge_existing_attempts=True,
+                resume_existing=True,
             )
             export.assert_not_called()
 

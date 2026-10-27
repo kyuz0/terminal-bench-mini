@@ -40,6 +40,14 @@ class PodmanDockerShimTests(unittest.TestCase):
         arguments = ["info", "--format", "{{.OSType}}"]
         self.assertEqual(shim.translated(arguments), (arguments, None))
 
+    def test_translates_harbor_rootless_detection_to_podman_capability(self):
+        self.assertEqual(
+            shim.translated(
+                ["info", "--format", "{{range .SecurityOptions}}{{.}}|{{end}}"]
+            ),
+            (["info", "--format", "{{if .Host.Security.Rootless}}rootless|{{end}}"], None),
+        )
+
     def test_translates_compose_cp_to_container_cp(self):
         arguments = [
             "compose",

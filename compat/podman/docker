@@ -41,6 +41,10 @@ COMPOSE_COMMANDS = {
 
 
 def translated(arguments: list[str]) -> tuple[list[str], Path | None]:
+    # Harbor uses this Docker-only field to choose the host-log ownership UID.
+    # Rootless Podman exposes the same capability under Host.Security instead.
+    if arguments == ["info", "--format", "{{range .SecurityOptions}}{{.}}|{{end}}"]:
+        return ["info", "--format", "{{if .Host.Security.Rootless}}rootless|{{end}}"], None
     if not arguments or arguments[0] != "compose":
         return arguments, None
 
